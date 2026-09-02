@@ -1,5 +1,8 @@
 # 微信公众号文章爬虫 · 实施计划
 
+> **状态(2026-09-03):本计划已被 v2 取代,仅存档,勿执行。**
+> 尖峰 B / B' / B'' 证伪了「mitmproxy 被动抓包」路线(列表/正文数据走 mmtls 私有长链,不经 HTTP 代理),尖峰 C 验证了「UIA 逐篇打开文章页提取 ValuePattern URL」成立。现行计划:`2026-09-03-wechat-official-account-crawler-v2.md`;实证记录:`docs/spike-findings.md`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 每天定时(08:05 / 19:05)通过已登录的 PC 微信 4.1.x 客户端自动遍历名单中的公众号,抓取其新发布文章的 URL/标题/发布时间,增量存入本地 SQLite。
