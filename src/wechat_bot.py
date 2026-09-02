@@ -295,7 +295,14 @@ def scan_list(host, max_nodes: int = 4000):
                 continue
         elif cls == CLASS_TIME:
             try:
-                times.append(((c.Name or "").strip(), c.BoundingRectangle.top))
+                label = (c.Name or "").strip()
+                if not label:  # 新版 UI:日期文本挂在子 TextControl 上(容器 Name 为空)
+                    for kid in walk_ctrls(c, max_nodes=8):
+                        t = (kid.Name or "").strip()
+                        if t:
+                            label = t
+                            break
+                times.append((label, c.BoundingRectangle.top))
             except Exception:
                 continue
     titles.sort(key=lambda x: x[1])
