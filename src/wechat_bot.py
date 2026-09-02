@@ -503,10 +503,16 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
                              close_wait: float = 2.5):
     """打开标题所在文章,提取其 raw URL,关闭文章 tab。返回 (raw_url|None, url数)。
 
-    url数 哨兵:-1 = 文章页未打开/无可 Invoke 卡片;0 = 已打开但未提取到 URL。
+    url数 哨兵:-1 = 文章页未打开/无可 Invoke 卡片/残留文章页未清干净
+    (此时本篇有意不打开);0 = 已打开但未提取到 URL。
     标题 TextControl 自身无 InvokePattern,向上最多 5 级找可 Invoke 的祖先卡片
     (尖峰C:class js_article_card…)。
     """
+    # 残留文章页防护:上一篇文章 tab 未关成功时,提取会拿到上一篇文章的 URL。
+    if find_article_host(timeout=0.5)[1] is not None:
+        close_article_tabs(max_close=3, wait=close_wait)
+        if find_article_host(timeout=1.0)[1] is not None:
+            return None, -1  # 清不掉残留,宁可本篇 pending 也不冒错配风险
     p = title_ctrl
     pat = None
     for _ in range(5):

@@ -27,6 +27,7 @@ def setup_logging(log_dir) -> logging.Logger:
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler(logfile, encoding="utf-8"),
                   logging.StreamHandler()],
+        force=True,
     )
     return logging.getLogger("crawler")
 
@@ -69,7 +70,11 @@ def _collect_list(cfg: CrawlConfig, host, cutoff: str | None):
 
 def process_account(store: Store, cfg: CrawlConfig, name: str,
                     log: logging.Logger) -> dict:
-    """抓一个账号,返回 {ok, new, upgraded, pending, message}。"""
+    """抓一个账号,返回 {ok, new, upgraded, pending, message}。
+
+    主页每轮都经搜索重新打开(不复用已开的旧 tab):旧 tab 列表不刷新,
+    会导致每轮扫到同一份旧列表、0 新增、水位线永久冻结。
+    """
     acc_id = store.get_or_create_account(name)
     watermark = store.watermark(acc_id)
     cutoff = None
@@ -77,15 +82,15 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
         cutoff = (date.fromisoformat(watermark) -
                   timedelta(days=cfg.overlap_days)).isoformat()
 
+    ok, msg = bot.search_open_profile(name)
+    if not ok:
+        bot.close_profile_tab(name, wait=cfg.close_tab_wait_sec)  # 尽力清理半开 tab
+        return {"ok": False, "new": 0, "upgraded": 0, "pending": 0, "message": msg}
     w, host = bot.find_profile_host(account=name, kicks=cfg.kick_retry)
     if host is None:
-        ok, msg = bot.search_open_profile(name)
-        if not ok:
-            return {"ok": False, "new": 0, "upgraded": 0, "pending": 0, "message": msg}
-        w, host = bot.find_profile_host(account=name, kicks=cfg.kick_retry)
-        if host is None:
-            return {"ok": False, "new": 0, "upgraded": 0, "pending": 0,
-                    "message": "主页已搜索但未就绪"}
+        bot.close_profile_tab(name, wait=cfg.close_tab_wait_sec)  # 尽力清理
+        return {"ok": False, "new": 0, "upgraded": 0, "pending": 0,
+                "message": "主页已搜索但未就绪"}
     if not bot.close_article_tabs(max_close=2, wait=cfg.close_tab_wait_sec):
         log.warning("[%s] 存在残留文章 tab,继续(提取前仍会校验)", name)
 
@@ -102,18 +107,21 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
         pairs = pairs[:stop]
         title_ctrls = title_ctrls[:stop]
 
-    seen = store.seen_fallbacks(acc_id)
+    seen = store.seen_fallbacks(acc_id, status="ok")  # pending 不跳过 → 次日可重试
     new = upgraded = pending = 0
     max_date = watermark
+    processed = 0
     for t_ctrl, (title, date_text) in zip(title_ctrls, pairs):
         if not title:
             continue
+        if processed:
+            time.sleep(random.uniform(2.0, 5.0))  # 文章间节奏(最后一篇后不休眠)
         fb = make_dedup_key(None, title, date_text)
         iso = normalize_date_text(date_text)
         if iso and (max_date is None or iso > max_date):
             max_date = iso
         if fb in seen:
-            continue  # 已入库(含 pending),不重复打开文章页
+            continue  # 已入库且 URL ok,不重复打开文章页
         raw, _n = bot.open_article_and_get_url(
             t_ctrl, open_timeout=cfg.article_open_timeout_sec,
             scan_timeout=cfg.url_scan_timeout_sec,
@@ -129,7 +137,7 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
         seen.add(fb)
         log.info("[%s] + %s (%s) url=%s", name, title[:40],
                  date_text or "?", "ok" if canon else "PENDING")
-        time.sleep(random.uniform(2.0, 5.0))  # 文章间节奏
+        processed += 1
 
     if max_date:
         store.set_watermark(acc_id, max_date)

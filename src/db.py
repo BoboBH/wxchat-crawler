@@ -84,15 +84,49 @@ class Store:
 
     # ---- 文章 ----
 
-    def seen_fallbacks(self, account_id: int) -> set[str]:
-        rows = self.conn.execute("SELECT fallback_key FROM articles WHERE account_id=?",
-                                 (account_id,)).fetchall()
+    def seen_fallbacks(self, account_id: int, status: str | None = None) -> set[str]:
+        """该账号已入库的 fallback_key;status 过滤(如 'ok' → 仅成功提取过 URL 的)。"""
+        sql = "SELECT fallback_key FROM articles WHERE account_id=?"
+        args: list = [account_id]
+        if status:
+            sql += " AND url_status=?"
+            args.append(status)
+        rows = self.conn.execute(sql, args).fetchall()
         return {r["fallback_key"] for r in rows}
 
     def upsert_article(self, account_id: int, fallback_key: str, canonical_url: str | None,
                        title: str, date_text: str | None,
                        publish_date: str | None) -> str:
-        """写入/升级一篇文章,返回 'new' | 'exists' | 'upgraded'。"""
+        """写入/升级一篇文章,返回 'new' | 'exists' | 'upgraded'。
+
+        canonical 优先识别:先按 dedup_key=canonical 找已有行;fallback 文本
+        漂移(如 标题|'' → 标题|日期)时 pending 行的 dedup_key 仍是旧
+        fallback_key,再按「同账号同标题且 pending」识别为同一篇文章,
+        升级而非重复插入。均未命中才走 fallback_key 查找。
+        """
+        if canonical_url:
+            row = self.conn.execute(
+                "SELECT id, url_status FROM articles WHERE account_id=? AND dedup_key=?",
+                (account_id, canonical_url)).fetchone()
+            if row is None:
+                row = self.conn.execute(
+                    "SELECT id, url_status FROM articles "
+                    "WHERE account_id=? AND title=? AND url_status='pending'",
+                    (account_id, title)).fetchone()
+            if row is not None:
+                if row["url_status"] == "pending":
+                    try:
+                        self.conn.execute(
+                            "UPDATE articles SET dedup_key=?, url=?, url_status='ok', "
+                            "fallback_key=?, title=?, date_text=?, publish_date=? WHERE id=?",
+                            (canonical_url, canonical_url, fallback_key, title, date_text,
+                             publish_date, row["id"]))
+                        self.conn.commit()
+                        return "upgraded"
+                    except sqlite3.IntegrityError:
+                        self.conn.rollback()
+                        return "exists"
+                return "exists"
         row = self.conn.execute(
             "SELECT id, url_status FROM articles WHERE account_id=? AND fallback_key=?",
             (account_id, fallback_key)).fetchone()
