@@ -38,6 +38,42 @@
 5. 搜索结果/主页控件 Name 为长文案拼接，版本更新可能变化，定位应优先用
    `AutomationId`/`class` 而非 Name 全文匹配。
 
+## Task 9 端到端操作流程(实测伪流程)
+
+以下为本次尖峰**实际打通**的导航流程，可作 Task 9（端到端采集）的实现蓝本：
+
+1. **定位浏览器窗口**：枚举顶层窗口，取 `ClassName='Chrome_WidgetWin_0'` 且进程为
+   `WeChatAppEx.exe` 的窗口（多个时取面积最大者）。不要走微信主窗口——其 Qt 树
+   （`Qt51514QWindowIcon`）为空，不可 UIA 寻址。
+2. **还原窗口**：若最小化（`BoundingRectangle.left <= -30000` 或 `WS_MINIMIZE`），
+   先 `ShowWindow(hwnd, SW_RESTORE)`，否则树为空、坐标全错。
+3. **激活无障碍树**：从窗口根手动 `GetChildren()` 爬一遍，找到
+   `PaneControl class='Chrome_RenderWidgetHostHWND' name='Chrome Legacy Window'`
+   宿主（**按 ClassName 定位**，其 AutomationId 每次导航都会变化）；不先爬一遍，
+   后续 FindFirst 全部失败。
+4. **输入搜索词**：在宿主子树下检索 `EditControl AutomationId='weixin-search-input'`，
+   `Click()` 聚焦 → 保存用户剪贴板 → `SetClipboardText('中金点睛')` →
+   `SendKeys('{Ctrl}a')`+`SendKeys('{Ctrl}v')` → 读回 Value 校验 → 结束后恢复剪贴板。
+   （`ValuePattern.SetValue()` 报成功但不触发页面事件，实测无效。）
+5. **触发搜索**：`ButtonControl Name='搜索'`（宿主子树，searchDepth≈15）`Invoke()`，
+   页面转为 `RootWebArea Name='中金点睛 - 搜一搜'`。
+6. **打开公众号主页**：`Invoke()` 结果页中 `ButtonControl class='header-detail'`
+   的卡片（按 Name 含 `公众号` 或账号名前缀过滤）→ 进入
+   `RootWebArea Name='中金点睛'`——**该页即完整历史列表**（4.x 无独立「历史消息」按钮）。
+7. **滚动加载**：`uia.MoveTo(宿主矩形中心)` 后 `uia.WheelDown(n)`，每轮之间轮询
+   `article__item__title` 数量直至不再增长；已实测 `WheelDown(10)`×3 轮标题数
+   17→39→50（无限滚动生效，`ScrollPattern` 不可用）。
+8. **采集列表**：标题 = `TextControl class='article__item__title'`（宿主子树，
+   容器 `profile_details__content`），日期分组 = `class='publish_time'`
+   （今天/昨天/星期一/8月23日…）；如只要群发文章，先 Invoke
+   `profile_details__tabs-item` 中的「文章」tab。
+9. **采集正文**：Invoke 单篇标题 → 同窗口新开 Tab（无新 hwnd）；从新宿主读取
+   `aid='activity-name'`（标题）、`aid='js_name'`（公众号）、`aid='publish_time'`、
+   `aid='js_author_name_text'`（作者）、`aid='js_content'`（正文全文）。
+   **文章 URL 不经 UIA 暴露（文章页无地址栏）→ 必须走抓包（尖峰B / Task 3）**；
+   Tab 切换只能按 Tab 控件（`TabStrip → FlueTabContainer → Tab`，无 Name）
+   的 BoundingRectangle 中心坐标点击。
+
 ## 探测过程备注
 
 1. `tools/spike_uia.py --list` 枚举顶层窗口 → 命中 `微信`（Weixin.exe）与
