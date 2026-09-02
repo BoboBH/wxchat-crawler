@@ -31,7 +31,7 @@ D:\Python312\python.exe -m venv .venv
 
 ## 名单与参数
 
-- `config/accounts.yaml` — 公众号名称列表(每行一个)。
+- `config/accounts.yaml` — 公众号名单,`accounts:` 键下每行一个 `- 名称`。
 - `config/settings.yaml` — 停止条数、重叠天数、账号间隔、超时等。
 
 ## 查看数据
@@ -44,13 +44,13 @@ D:\Python312\python.exe -m venv .venv
 
 ## 运行与排障
 
-- 日志:`logs\crawl_YYYY-MM-DD.log`(每轮一条 `crawl_runs` 记录)。
+- 日志:`logs\crawl_YYYY-MM-DD.log`(正常轮次各写一条 `crawl_runs` 记录(环境预检未通过的轮次不写))。
 - `url_status='pending'` 的文章 = 当轮没提取到 URL(可能是无页内链接的
   简排版文章,或超时);次日该文仍在列表时自动重试补全。
 - **桌面需解锁**:文章页提取全程可用 UIA 完成(锁屏也行),但搜索框
   粘贴依赖合成键鼠 —— 锁屏时段运行的轮次中,账号会失败并留日志,
   下一轮自动重试。
-- **微信大版本更新**后控件可能变化:先 `python run_crawl.py --check`
+- **微信大版本更新**后控件可能变化:先 `.venv\Scripts\python.exe run_crawl.py --check`
   (版本不匹配会告警),再按 `docs\spike-findings.md` 用 `tools\`
   下的尖峰工具重新校准 `src\wechat_bot.py` 顶部常量。
 - 微信未登录/未启动:本轮立即中止,日志提示,下一轮自动恢复。
