@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/*.db*
+data/.current_account
+data/spike_profile_ext.json
+logs/*
+!logs/.gitkeep
