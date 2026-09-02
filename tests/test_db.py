@@ -33,6 +33,26 @@ def test_upsert_new_exists_upgrade(store):
     assert rows[0]["url_status"] == "ok"
 
 
+def test_upgrade_collision_returns_exists(store):
+    acc = store.get_or_create_account("中金点睛")
+    canon = "https://mp.weixin.qq.com/s?__biz=x&mid=1&idx=1&sn=s&chksm=c"
+    assert store.upsert_article(acc, "t|f1", None, "A", None, None) == "new"
+    # 另一行先持有该 canonical
+    assert store.upsert_article(acc, "t|f2", canon, "B", None, None) == "new"
+    # 升级 pending 行时 dedup_key 碰撞 → exists(不抛异常),且该行仍为 pending
+    assert store.upsert_article(acc, "t|f1", canon, "A", None, None) == "exists"
+    assert store.conn.execute(
+        "SELECT url_status FROM articles WHERE fallback_key='t|f1'").fetchone()["url_status"] == "pending"
+
+
+def test_insert_collision_returns_exists(store):
+    acc = store.get_or_create_account("中金点睛")
+    canon = "https://mp.weixin.qq.com/s?__biz=x&mid=1&idx=1&sn=s&chksm=c"
+    assert store.upsert_article(acc, "t|a", canon, "A", None, None) == "new"
+    assert store.upsert_article(acc, "t|b", canon, "B", None, None) == "exists"
+    assert len(store.conn.execute("SELECT 1 FROM articles").fetchall()) == 1
+
+
 def test_seen_fallbacks(store):
     acc = store.get_or_create_account("中金点睛")
     store.upsert_article(acc, "t|a", None, "A", None, None)

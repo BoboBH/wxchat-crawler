@@ -111,11 +111,15 @@ class Store:
                 self.conn.rollback()
                 return "exists"
         if canonical_url and row["url_status"] == "pending":
-            self.conn.execute(
-                "UPDATE articles SET dedup_key=?, url=?, url_status='ok' WHERE id=?",
-                (canonical_url, canonical_url, row["id"]))
-            self.conn.commit()
-            return "upgraded"
+            try:
+                self.conn.execute(
+                    "UPDATE articles SET dedup_key=?, url=?, url_status='ok' WHERE id=?",
+                    (canonical_url, canonical_url, row["id"]))
+                self.conn.commit()
+                return "upgraded"
+            except sqlite3.IntegrityError:
+                self.conn.rollback()
+                return "exists"
         return "exists"
 
     # ---- 运行记录 ----
