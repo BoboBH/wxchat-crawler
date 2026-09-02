@@ -262,13 +262,17 @@ def invoke_control(ctrl) -> bool:
 
 def active_doc(win) -> str:
     """窗口当前激活页的 doc 名(取宽度>100 的最大渲染宿主)。"""
-    hosts = [h for h in find_render_hosts(win)
-             if h.BoundingRectangle.right - h.BoundingRectangle.left > 100]
-    if not hosts:
+    try:
+        hosts = []
+        for h in find_render_hosts(win):
+            r = h.BoundingRectangle
+            if r.right - r.left > 100:
+                hosts.append((h, (r.right - r.left) * (r.bottom - r.top)))
+        if not hosts:
+            return ""
+        return host_doc_name(max(hosts, key=lambda x: x[1])[0])
+    except Exception:
         return ""
-    h = max(hosts, key=lambda c: (c.BoundingRectangle.right - c.BoundingRectangle.left) *
-                                 (c.BoundingRectangle.bottom - c.BoundingRectangle.top))
-    return host_doc_name(h)
 
 
 # ---------------------------------------------------------------- 主页列表
@@ -316,7 +320,8 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
 
     前置:任一 AppEx 窗口有含 weixin-search-input 的搜索页 tab(部署时人工
     打开一次「搜一搜」即可,之后复用)。剪贴板临时占用并在 finally 恢复;
-    粘贴是合成键鼠,锁屏下会失败。
+    粘贴是合成键鼠,锁屏下会失败。失败时可能残留已打开的主页 tab
+    (由编排层负责清理,见 close_profile_tab)。
     """
     win, host, edit = find_search_entry()
     if edit is None:
@@ -351,7 +356,7 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
         t0 = time.time()
         opened = False
         while time.time() - t0 < nav_timeout:
-            w2, h2 = find_host(
+            _w2, h2 = find_host(
                 lambda c: (c.ClassName or "") == CLASS_RESULT_CARD
                 and (c.Name or "").startswith(account), max_nodes=3000)
             if h2 is not None:
@@ -371,10 +376,15 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
         if not opened:
             return False, f"未出现[{account}]的公众号结果卡片(搜索可能无结果)"
         t0 = time.time()
+        kicked = 0
         while time.time() - t0 < nav_timeout:
-            w3, h3 = find_profile_host(account=account, kicks=0)
+            _w3, h3 = find_profile_host(account=account, kicks=0)
             if h3 is not None:
                 return True, f"主页已打开 doc={host_doc_name(h3)!r}"
+            wins = appex_windows(retries=1)
+            if wins:
+                kick_window(wins[kicked % len(wins)])
+                kicked += 1
             time.sleep(1.0)
         return False, "主页未就绪(未找到 article__item__title)"
     finally:
@@ -441,12 +451,12 @@ def close_article_tabs(max_close: int = 3, wait: float = 2.5) -> bool:
     下一次提取拿到上一篇的 URL。"""
     for _ in range(max_close):
         w, h = find_host(lambda c: (c.AutomationId or "") in ARTICLE_MARKERS,
-                         max_nodes=800)
+                         max_nodes=1200)
         if h is None:
             return True
         close_active_tab(wait=wait)
         time.sleep(1.0)
-    w, h = find_host(lambda c: (c.AutomationId or "") in ARTICLE_MARKERS, max_nodes=800)
+    w, h = find_host(lambda c: (c.AutomationId or "") in ARTICLE_MARKERS, max_nodes=1200)
     return h is None
 
 
@@ -456,7 +466,7 @@ def close_profile_tab(account: str, wait: float = 2.5, max_try: int = 3) -> bool
         w, h = find_profile_host(account=account, kicks=0)
         if h is None:
             return True
-        if active_doc(w) != account:
+        if account not in active_doc(w):
             return False  # 主页不是激活页,不冒险关 tab
         if not close_active_tab(wait=wait):
             time.sleep(1.0)
@@ -493,6 +503,7 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
                              close_wait: float = 2.5):
     """打开标题所在文章,提取其 raw URL,关闭文章 tab。返回 (raw_url|None, url数)。
 
+    url数 哨兵:-1 = 文章页未打开/无可 Invoke 卡片;0 = 已打开但未提取到 URL。
     标题 TextControl 自身无 InvokePattern,向上最多 5 级找可 Invoke 的祖先卡片
     (尖峰C:class js_article_card…)。
     """
@@ -517,7 +528,7 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
         pat.Invoke()
     except Exception:
         return None, -1
-    w, h = find_article_host(timeout=open_timeout)
+    _w, h = find_article_host(timeout=open_timeout)
     if h is None:
         close_article_tabs(max_close=2, wait=close_wait)
         return None, -1
@@ -528,7 +539,8 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
         if urls:
             break
         time.sleep(1.0)
-    close_active_tab(wait=close_wait)
+    if not close_active_tab(wait=close_wait):
+        close_article_tabs(max_close=2, wait=close_wait)
     if not urls:
         return None, 0
     # 每篇通常恰 1 个;偶含页内小程序链接时,最短者为主文 URL(尖峰C 经验)
