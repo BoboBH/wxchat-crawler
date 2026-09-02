@@ -239,3 +239,72 @@ UIA 暴露」,**「UIA 驱动 + mitmproxy 被动抓包」组合无法产出文�
 本机微信 4.1.12.55 无已验证的文章 URL 获取通道;建议按候选 3(重定产物)+ 候选 1(可选增强)
 推进,并把「坐标换算重测」列为 Task 9 的前置验证项。
 
+---
+
+# 可行性尖峰B'' —— mp_profile 页面壳 HTML 内嵌数据验证(2026-09-03)
+
+- **环境**: Windows 11 / 微信 4.1.12.55(已登录)/ mitmproxy 12.2.3(venv,带剥条件请求头钩子)/
+  系统代理 127.0.0.1:8888(Clash Verge 在后台但未占用系统代理)
+- **背景**: 尖峰B 曾观测 `GET channels.weixin.qq.com/web/pages/mp_profile?…` 返回 200 HTML 但未存响应体。
+  本尖峰验证最后一个假设:**页面壳 HTML 是否 SSR/内嵌 JSON 数据块,首屏文章列表可直接提取**
+  (若成立,被动抓包路线即可复活——增量采集只需首屏)。
+- **产物**: `tools/spike_capture_addon.py`(新增 mp_profile 专项捕获:每个账号存
+  `data/spike3c_mp_profile_<账号id前12位>.html`,打印 status/len/`mp.weixin.qq.com/s?` 计数)、
+  `tools/spike_navigate.py`(invoke 修正为 `GetInvokePattern()`,新增 `reload_active_profile()`)。
+  证据 `data/spike3c_mitmdump.log`、`data/spike3c_mp_profile_nobiz.html`(4140B 页面壳,gitignore)。
+- **Gate B'' 结论:假设失败(HYPOTHESIS_FAIL)** —— mp_profile 的 HTML 是**纯客户端渲染的 SPA 壳**,
+  不含任何文章数据;「mitmproxy 被动截 HTML → 解析内嵌列表」路线**死亡**,被动抓包路线至此全部关闭。
+
+## 实测结果
+
+| 项 | 实测值 |
+| --- | --- |
+| 捕获方式 | 系统代理 8888 + mitmdump(剥 `If-None-Match`/`If-Modified-Since` 钩子);因 AppEx 窗口不在前台,导航类输入全部失效,最终以 **UIA `InvokePattern` Invoke「重新加载」按钮** 触发整页重取 |
+| 响应 | `status=200`,响应体 **4140 字节**(钩子生效,拿到的是完整体而非 304) |
+| 请求 URL | `GET channels.weixin.qq.com/web/pages/mp_profile?bizusername=gh_2474c33c9534` —— **4.x 主页壳的账号参数是 `bizusername=gh_xxx`**(gh_ 账号 id),不是老的 base64 `biz`;中金点睛 = `gh_2474c33c9534` |
+| 文章 URL 计数 | `mp.weixin.qq.com/s?` 原始 **0** 处,JSON 转义 `\/s?` **0** 处 |
+| 内嵌数据块 | `__INITIAL_STATE__`/`__QMTPL*`/`window.__*`/`application/json`/`articleList`/`msg_list`/`general_msg_list`/`__NUXT` **全部 0 命中**;`<body>` 里只有空挂载点 `<div id="app"></div>` |
+| 页面壳本质 | **Vite/Vue SPA 骨架**(`web-finder` = 视频号/公众号统一 web 工程):module scripts + polyfills + 空 `#app`;启动脚本显式调用 **`window.xweb.worker.connect()`** 并 `postMessage({apiName:'hello'})` —— 页面全部数据经 **XWeb worker 桥**(客户端私有通道,即尖峰B 判定的 mmtls 长链)注入,HTTP 上只见壳 |
+| 重取时的全部流量 | 仅 ①壳本体(200/4140B)②`POST channels.weixin.qq.com/web/report-perf`(遥测);`mp.weixin.qq.com` 仅 jsmonitor 埋点。**已渲染的文章列表在整页 reload 时零数据请求** —— 列表数据从不走 HTTP |
+| 「郭磊宏观茶座」样本 | **未捕获**。该号 tab 存在(条带 8 个 tab 之一)但无法切换:见下「意外」 |
+| 滚动对照实验 | 未执行(代理窗口期预算内未完成);等效证据更强:**整页 reload 都不产生列表数据请求**,滚动更不可能有 |
+
+## 意外与应对(本次踩坑实录,后续自动化必读)
+
+1. **AppEx 窗口不在前台时,一切合成输入失效**:`SetForegroundWindow`/`SwitchToThisWindow`/
+   `AttachThreadInput`/Alt-trick/minimize+restore **全部被拒**(前台属第三方窗口 Everything 时);
+   合成鼠标点击虽能命中窗口(WindowFromPoint 证实)但 **tab 条不切换、按钮不触发**;
+   键盘(Ctrl+W/Ctrl+R)发去了前台窗口。**唯一可靠的 UI 动作通道是 UIA Pattern**:
+   `ReloadButton`(类名即此,rect≈579,96-611,128)`GetInvokePattern().Invoke()` 成功触发重载;
+   uiautomation 2.0.29 的正确 API 是 `GetInvokePattern()`,**不是** `.InvokePattern` 属性
+   (尖峰B 备注第 1 条有误,已修正)。
+2. **tab 条真实几何**(UIA 树实测,视觉模型读数不可靠):`TabStripRegionView(610,91,1497,138)`
+   → `TabStripScrollContainer → OverflowView → ScrollView::Viewport → TabStrip → FlueTabContainer`
+   → 8 个 `Tab`(各 91-132 高、约 100px 宽,从 x=615 起);Tab 无 Name、无 SelectionItemPattern,
+   **无法按名称寻址,也无法 UIA 选择**;关闭按钮 `ImageButton name='关闭'` 悬停才出现。
+   顶部另有 `ReloadButton`/后退/前进 `ImageButton(509-580,98-129)`、`收起` 按钮(610,91,645,127)、
+   `LocationBarView`(1396,91,1437,133)。
+3. **第三方悬浮窗遮挡**:Everything 悬浮窗覆盖主屏中部(WindowFromPoint(1080,600)=Everything),
+   截图视觉分析会把它的 UI 误读进目标窗口 —— 判定坐标必须用 `WindowFromPoint` 逐点核实,
+   不能只信截图描述。
+4. **addon 参数修正**:mp_profile 的账号参数是 `bizusername`(gh_ id),addon 已改为
+   `bizusername` 优先(`biz` 兜底),文件名按账号 id 前 12 位。
+
+## 结论(Gate B'')
+
+**HYPOTHESIS_FAIL** —— mp_profile 页面壳是空 SPA 骨架,首屏文章列表**不在** HTML 里,
+也无任何内嵌 JSON;数据经 XWeb worker 桥(mmtls 私有长链)注入,被动抓包在**架构上**
+就不可能拿到列表。至此:**UIA 属性穷举(尖峰B')、CDP 挂载(尖峰B')、被动抓包
+(尖峰B + B'')三条路线全部证实不可行**。维持尖峰B' 的架构建议:按候选 3 重定项目产物
+(UIA 采集「标题+日期+正文全文」,去重用标题+时间哈希),文章 URL 仅在愿意承担
+「native 分享面板盲点 + 每篇 ≥8s」成本时作可选增强。
+
+## 复现步骤(本次实际执行序)
+
+1. 增强插件与导航脚本 → `.venv/Scripts/mitmdump.exe --listen-port 8888 -s tools/spike_capture_addon.py > data/spike3c_mitmdump.log 2>&1 &`;
+2. `tools/spike_set_proxy.ps1` 开代理(窗口#1,约 5.5min):UIA 导航尝试因窗口失焦失败,关代理还原;
+3. 离线排查前台/点击/坐标问题(截图 + WindowFromPoint + UIA 树),定位 `ReloadButton`;
+4. 再次开代理(窗口#2,约 2.8min,两窗合计 ≈8.3min):`GetInvokePattern().Invoke()` 触发重载 →
+   插件即刻捕获壳 HTML(status=200/4140B)→ 关代理并 reg 验证 `ProxyEnable=0x0` → kill mitmdump;
+5. 离线分析壳 HTML 与全量日志(上文实测表)。
+

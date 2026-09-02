@@ -14,6 +14,7 @@
 """
 import argparse
 import ctypes
+import ctypes.wintypes
 import os
 import sys
 import time
@@ -31,11 +32,50 @@ log = lambda msg: print(f"[nav] {msg}", flush=True)
 
 
 def invoke(ctrl):
-    """uiautomation 2.0 无 Control.Invoke(),走 InvokePattern,失败退化为鼠标点击。"""
+    """触发按钮:优先 GetInvokePattern().Invoke()(UIA 动作由提供者线程执行,
+    不依赖窗口前台/不被 UIPI 拦截,尖峰B''实测是唯一可靠通道),
+    失败退化 LegacyIAccessible.DoDefaultAction,再退化坐标点击。"""
     try:
-        ctrl.InvokePattern.Invoke()
+        ctrl.GetInvokePattern().Invoke()
+        return True
     except Exception:
-        ctrl.Click(simulateMove=False)
+        pass
+    try:
+        ctrl.GetLegacyIAccessiblePattern().DoDefaultAction()
+        return True
+    except Exception:
+        pass
+    ctrl.Click(simulateMove=False)
+    return False
+
+
+def reload_active_profile():
+    """对当前激活 tab Invoke「重新加载」按钮,强制重取 mp_profile 页面壳。
+
+    尖峰B''实测:窗口不在前台时合成鼠标点击与键盘全部无效
+    (SetForegroundWindow 被拒、tab 条点击不切换),唯一可行的是
+    UIA InvokePattern —— ReloadButton 控件支持 InvokePattern。
+    返回 (ok, 说明)。
+    """
+    win = find_browser_window()
+    if win is None:
+        return False, "无浏览器窗口"
+    btn = None
+    stack = [(win, 0)]
+    while stack:
+        c, d = stack.pop()
+        try:
+            if (c.ClassName or "") == "ReloadButton":
+                btn = c
+                break
+            if d < 14:
+                stack.extend((k, d + 1) for k in c.GetChildren())
+        except Exception:
+            continue
+    if btn is None:
+        return False, "未找到 ReloadButton(按钮区 rect 约 579,96-611,128)"
+    ok = invoke(btn)
+    return ok, "已 Invoke 重新加载" if ok else "Invoke 失败"
 
 
 def activate(win):
@@ -167,40 +207,148 @@ def scroll_load(win, rounds, label=""):
     return last
 
 
+def doc_name(host):
+    """返回当前网页 RootWebArea 的 Name(公众号主页时即账号名)。"""
+    try:
+        d = host.DocumentControl(searchDepth=3)
+        if d.Exists(2, 0.5):
+            return (d.Name or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def close_tab(win):
+    """对浏览器窗口发 Ctrl+W 关闭当前 tab(用于从主页退回搜索页)。"""
+    try:
+        restore_if_minimized(win)
+        win.SetActive()
+    except Exception:
+        pass
+    time.sleep(0.3)
+    uia.SendKeys("{Ctrl}w")
+    time.sleep(1.8)
+
+
+def find_search_input(win):
+    win = find_browser_window() or win
+    if win is None:
+        return None, None
+    host = pick_active_host(win)
+    if host is None:
+        return win, None
+    edit = host.EditControl(AutomationId="weixin-search-input", searchDepth=30)
+    return win, (edit if edit.Exists(2, 0.5) else None)
+
+
+def goto_search(win, max_close=2):
+    """确保当前页带搜索框;没有则 Ctrl+W 逐个关 tab,直到找到或放弃。"""
+    for i in range(max_close + 1):
+        win, edit = find_search_input(win)
+        if edit is not None:
+            if i:
+                log(f"第{i}次 Ctrl+W 后搜索框可用")
+            return win, True
+        if i == max_close:
+            break
+        log(f"当前页(doc={doc_name(pick_active_host(win) or win)!r})无搜索框,"
+            f"Ctrl+W 关 tab ({i + 1}/{max_close})")
+        close_tab(win)
+        if find_browser_window() is None:
+            log("Ctrl+W 后浏览器窗口消失,停止关闭")
+            break
+    return win, False
+
+
+def open_account(win, account, dwell):
+    """搜索并打开指定公众号主页,停留 dwell 秒(不滚动)。返回 (win, ok, 说明)。"""
+    win = find_browser_window() or win
+    host = pick_active_host(win)
+    name = doc_name(host) if host is not None else ""
+    n_titles = len(collect_titles(host)) if host is not None else 0
+    if account and account in name and n_titles:
+        log(f"[{account}] 已在该公众号主页(doc={name!r},标题数={n_titles}),跳过搜索")
+    else:
+        win, ok = goto_search(win)
+        if not ok:
+            return win, False, "无法回到带搜索框的页面"
+        ok, msg = search_flow(win, account)
+        log(f"[{account}] 搜索流程: {msg}")
+        if not ok:
+            return win, False, msg
+    win = find_browser_window() or win
+    host = activate(win)
+    time.sleep(dwell)
+    host = pick_active_host(win) or host
+    titles = collect_titles(host)
+    name = doc_name(host)
+    log(f"[{account}] 主页就绪 doc={name!r} 标题数={len(titles)} "
+        f"样本={[t[0][:16] for t in titles[:3]]} (停留{dwell:.0f}s,未滚动)")
+    return win, True, f"titles={len(titles)} doc={name!r}"
+
+
+def scroll_test(win, wheels=(10, 10)):
+    """滚动对照实验:WheelDown 若干屏,观察标题数变化(mitmdump 侧看是否新增请求)。"""
+    win = find_browser_window() or win
+    if win is None:
+        return
+    try:
+        win.SetActive()
+    except Exception:
+        pass
+    host = pick_active_host(win)
+    if host is None:
+        log("滚动对照: 无宿主,跳过")
+        return
+    r = win.BoundingRectangle
+    cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+    ctypes.windll.user32.SetCursorPos(int(cx), int(cy))
+    time.sleep(0.4)
+    pt = ctypes.wintypes.POINT()
+    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+    log(f"滚动对照: 光标=({pt.x},{pt.y}) 窗口中心=({cx},{cy})")
+    before = len(collect_titles(host))
+    log(f"滚动对照: 滚动前标题数={before}")
+    for k, w in enumerate(wheels, 1):
+        uia.WheelDown(w)
+        time.sleep(2.5)
+        host = pick_active_host(find_browser_window() or win) or host
+        titles = collect_titles(host)
+        log(f"滚动对照: 第{k}次 WheelDown({w}) 后标题数={len(titles)} "
+            f"样本={[t[0][:16] for t in titles[:3]]}")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--account", default="中金点睛")
-    ap.add_argument("--rounds", type=int, default=10)
+    ap.add_argument("--account", default=None, help="单个账号(向后兼容)")
+    ap.add_argument("--accounts", default="中金点睛,郭磊宏观茶座",
+                    help="逗号分隔,依次打开的公众号")
+    ap.add_argument("--rounds", type=int, default=0,
+                    help=">0 时恢复旧行为:对每个主页做滚轮无限加载")
+    ap.add_argument("--dwell", type=float, default=8.0, help="每个主页停留秒数")
+    ap.add_argument("--no-scroll-test", dest="scroll_test", action="store_false",
+                    help="最后一个主页不做 WheelDown 2 屏对照")
     args = ap.parse_args()
+
+    accounts = [a for a in (args.accounts or "").split(",") if a]
+    if args.account:
+        accounts = [args.account]
 
     win = find_browser_window()
     if win is None:
         sys.exit("未找到 WeChatAppEx 浏览器窗口")
     log(f"浏览器窗口 pid={win.ProcessId} name={win.Name!r}")
-    host = activate(win)
-    state, why = page_state(host)
-    log(f"当前页面状态: {state} ({why})")
 
-    if state == "search":
-        ok, msg = search_flow(win, args.account)
-        log(f"搜索流程: {msg}")
+    for i, account in enumerate(accounts):
+        win, ok, info = open_account(win, account, args.dwell)
         if not ok:
-            sys.exit(2)
-        win = find_browser_window() or win
-        activate(win)
-    elif state == "other":
-        doc = pick_active_host(win)
-        names = []
-        try:
-            d = doc.DocumentControl(searchDepth=3)
-            d = d if d.Exists(2, 0.5) else doc
-            names = [(c.Name or "")[:40] for c in d.GetChildren()][:15]
-        except Exception as exc:
-            names = [f"<{exc!r}>"]
-        sys.exit(f"未知页面,RootWebArea 子节点: {names}")
-
-    n = scroll_load(win, args.rounds)
-    log(f"结束,最终标题数={n}")
+            log(f"[{account}] 打开失败: {info}")
+            continue
+        if args.rounds > 0:
+            scroll_load(win, args.rounds, label=account)
+        elif args.scroll_test and i == len(accounts) - 1:
+            scroll_test(win)
+    log("结束")
 
 
 if __name__ == "__main__":

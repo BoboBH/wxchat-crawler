@@ -8,4 +8,5 @@ data/spike_profile_ext.json
 logs/*
 !logs/.gitkeep
 data/spike_*
+data/spike3c_*
 tools/__pycache__/

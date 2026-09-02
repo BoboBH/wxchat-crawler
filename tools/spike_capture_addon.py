@@ -123,6 +123,38 @@ def requestheaders(flow):
                 pass
 
 
+MP_PROFILE_DIR = os.path.join(ROOT, "data")
+
+
+def _capture_mp_profile(flow, q):
+    """尖峰B'':mp_profile 页面壳 HTML 专项捕获 —— 验证 SSR/内嵌 JSON 是否含文章列表。
+
+    每个不同 biz 存一份 data/spike3c_mp_profile_<biz前8位>.html,并打印
+    响应体大小与 mp.weixin.qq.com/s? 的出现次数(含 JSON 转义形态 \\/s?)。
+    """
+    try:
+        body = flow.response.get_text(strict=False) or ""
+    except Exception as exc:
+        _log(f"[spike3c] mp_profile 响应体读取失败: {exc!r}")
+        return
+    qs = dict(parse_qs(q.query))
+    # 实测(尖峰B''):4.x 主页壳的账号参数是 bizusername=gh_xxx,不是老的 base64 biz
+    biz = (qs.get("bizusername") or qs.get("biz") or [""])[0]
+    key = (biz[:12] or "nobiz").replace("/", "_")
+    n_raw = body.count("mp.weixin.qq.com/s?")
+    n_esc = body.count("mp.weixin.qq.com\\/s?")
+    n_biz_esc = body.count("\\/s?__biz=")
+    try:
+        status = flow.response.status_code
+    except Exception:
+        status = -1
+    path = os.path.join(MP_PROFILE_DIR, f"spike3c_mp_profile_{key}.html")
+    saved = len(body) <= MAX_SAVE_BYTES and _save(path, body)
+    _log(f"[spike3c] mp_profile status={status} biz={biz!r} len={len(body)} "
+         f"s_url_raw={n_raw} s_url_escaped={n_esc} esc_s_biz={n_biz_esc} "
+         f"saved={saved} -> {os.path.relpath(path, ROOT)}")
+
+
 def response(flow):
     try:
         url = flow.request.pretty_url
@@ -144,6 +176,10 @@ def response(flow):
             _log(f"{flow.request.method} {host}{q.path} action={action} ct={ctype.split(';')[0] or '(空)'}")
         elif n <= 2 or n % 25 == 0:
             _log(f"(采样#{n}) {host}{q.path}")
+
+        # 尖峰B'':公众号主页页面壳专项捕获(每个 biz 一份,统计内嵌文章 URL)
+        if host == "channels.weixin.qq.com" and "mp_profile" in q.path:
+            _capture_mp_profile(flow, q)
 
         # 请求体:channels/mp 域的 POST 可能携带翻页游标
         if interesting and host in ("channels.weixin.qq.com", "mp.weixin.qq.com") \
