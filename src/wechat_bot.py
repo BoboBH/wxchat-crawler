@@ -28,7 +28,8 @@ CLASS_TIME = "publish_time"               # 主页日期分组标签
 CLASS_CARD = "js_article_card"            # 列表条目卡片(带 InvokePattern)
 SEARCH_INPUT_ID = "weixin-search-input"   # 搜索页输入框 AutomationId
 SEARCH_BUTTON_NAME = "搜索"                # 搜索触发按钮
-CLASS_RESULT_CARD = "header-detail"       # 搜索结果的公众号卡片
+CLASS_RESULT_CARD = "header-detail"       # 搜索结果卡片(公众号/小程序等同名前缀,需再筛)
+RESULT_ACCOUNT_MARK = "公众号"             # 公众号卡片 Name 含此标记(小程序卡片没有)
 CLOSE_BUTTON_NAME = "关闭"                 # tab 关闭按钮(ImageButton)
 CLASS_TAB = "Tab"                         # tab 条上的单个 tab
 ARTICLE_MARKERS = ("activity-name", "js_content", "js_name")  # 文章页 aid 锚点
@@ -326,6 +327,14 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
     win, host, edit = find_search_entry()
     if edit is None:
         return False, "未找到搜索页(weixin-search-input);请先在微信中打开一次「搜一搜」"
+
+    def is_account_card(c) -> bool:
+        """结果页公众号卡片:同名前缀的小程序/文章卡片(实测同名开头)必须排除,
+        否则会 Invoke 到小程序卡片 → 打开空白小程序壳而非主页。"""
+        name = c.Name or ""
+        return ((c.ClassName or "") == CLASS_RESULT_CARD
+                and name.startswith(account) and RESULT_ACCOUNT_MARK in name)
+
     clip = ""
     try:
         clip = uia.GetClipboardText() or ""
@@ -356,15 +365,12 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
         t0 = time.time()
         opened = False
         while time.time() - t0 < nav_timeout:
-            _w2, h2 = find_host(
-                lambda c: (c.ClassName or "") == CLASS_RESULT_CARD
-                and (c.Name or "").startswith(account), max_nodes=3000)
+            _w2, h2 = find_host(is_account_card, max_nodes=3000)
             if h2 is not None:
                 card = None
                 for c in walk_ctrls(h2, max_nodes=3000):
                     try:
-                        if (c.ClassName or "") == CLASS_RESULT_CARD and \
-                                (c.Name or "").startswith(account):
+                        if is_account_card(c):
                             card = c
                             break
                     except Exception:
