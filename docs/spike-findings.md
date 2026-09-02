@@ -308,3 +308,97 @@ UIA 暴露」,**「UIA 驱动 + mitmproxy 被动抓包」组合无法产出文�
    插件即刻捕获壳 HTML(status=200/4140B)→ 关代理并 reg 验证 `ProxyEnable=0x0` → kill mitmdump;
 5. 离线分析壳 HTML 与全量日志(上文实测表)。
 
+---
+
+# 可行性尖峰C —— 逐篇打开文章提取 canonical URL(2026-09-03)
+
+- **环境**: Windows 11 / 微信 4.1.12.55(已登录)/ uiautomation 2.0.29(venv)/
+  **验证期间工作站处于锁屏状态(LockApp.exe 为前台窗口)**
+- **背景**: 尖峰A/B/B'/B'' 关闭了「列表直接拿 URL」与被动抓包全部路线后,验证最后一个目标假设:
+  **逐篇打开新文章后,能否程序化拿到该文章自身的 canonical URL**。
+- **产物**: `tools/spike_article_url.py`(沉淀版,main=打开第 N 篇→提取 URL→打印,
+  含 `--times/--index/--verify`)、`tools/spike3d_probe.py`(过程探针:窗口/tab 枚举、
+  聚焦属性 grep、模式统计)。
+- **Gate C 结论:成立(URL_ENHANCE_WORKS)** —— 文章页 a11y 树中 HyperlinkControl 的
+  `ValuePattern.Value`(与 `LegacyIAccessible.Value` 同值)携带**当前文章自身的 canonical URL**
+  (`mp.weixin.qq.com/s?__biz=…&mid=…&idx=…&sn=…&chksm=…`)。两篇不同文章均取到各自 URL,
+  公网 GET 的 og:title 与所开文章标题逐一吻合;同一篇文章重复提取 URL 完全一致。
+
+## 判定证据(URL_ENHANCE_WORKS)
+
+| 文章(Invoke 的列表条目) | 提取到的 URL(精简 5 参数) | 公网验证 |
+| --- | --- | --- |
+| 中金 \| Token启示录(六):开源模型价值透析 | `https://mp.weixin.qq.com/s?__biz=MzI3MDMzMjg0MA==&mid=2247857353&idx=2&sn=ae957b8c2f9ef7bcf0c0a1c438f2722c&chksm=eb6a7778638a3b11c8bff50586d670f685a1cf793c071895f6fa4ef18039364415213f6fecd9` | HTTP 200,3.5MB 全文,`og:title`=同名,账号=中金点睛,`oriCreateTime=1788306300`(2026-09-02 07:45 +08) |
+| 中金• 全球研究 \| 印尼:政策紧缩遇上经济增长蓝图 | `https://mp.weixin.qq.com/s?__biz=MzI3MDMzMjg0MA==&mid=2247857036&idx=2&sn=6b368de1f5e01dc2644f24e5e51ae4ad&chksm=eb5b1728548e9f49dedceb5dcc4eedf23f78984d52a7bb71effad8fd616f2d57445d687499e5` | HTTP 200,`og:title`=同名 |
+
+- URL 原始值还带 `scene/sessionid/clicktime/enterid/key/uin/pass_ticket/wx_header` 等客户端
+  跟踪参数(uin=登录用户);**去参数后的 5 参数 URL 即公网可开的 canonical 链接**(实测直连
+  GET 成功;曾出现过一次反爬 verify 挑战页,稍后重试同 URL 返回全文 → 挑战是间歇性的,
+  入库建议存全参数 URL、以 5 参数为去重键)。
+- 同一篇(idx=0)在约 1 小时内 **3 次提取(含两次连续脚本运行)URL 逐字节一致** → 可作稳定主键。
+- 与尖峰A「Invoke 单篇标题打开文章」不同,本次必须 Invoke **带 InvokePattern 的祖先卡片**
+  (class `js_article_card …`);标题 TextControl 自身无 InvokePattern。
+
+## 成功手段与确定性操作序列(手段1 变体,全部 UIA Pattern,不依赖前台/键鼠)
+
+1. **选窗口按内容,不按顺序/面积**:AppEx 有两个顶层窗口(主浏览器 `微信` + 侧窗
+   `中金点睛` doc=`AppIndex`),Z 序在操作间会翻转;取「宿主树里存在
+   `article__item__title`」的窗口为主页。
+2. **打开文章**:主页树取 `article__item__title`(按 top 排序)→ 向上最多 4 级找
+   `GetPattern(PatternId.InvokePattern)` 非空的祖先卡片 → `Invoke()` → 新 tab 激活。
+3. **等文章页**:轮询各窗口宿主,树中出现 `aid∈{activity-name, js_content, js_name}`
+   即文章页(**不能按 doc 名过滤** —— 侧窗 doc=`AppIndex` 同样 ≠ 主页名)。
+4. **提取 URL**:文章宿主全树(833~1218 节点,扫描 1.8~2.2s)逐控件
+   `GetPattern(PatternId.ValuePattern).Value`,正则取 `mp.weixin.qq.com/s?__biz=…`;
+   实测每篇恰好 1 个,即文章自身 URL。
+5. **关 tab 还原**:「激活 tab」= 其子控件 `ImageButton Name='关闭'` 的 rect **完整落在
+   Tab rect 内**(非激活 tab 的关闭按钮 rect 是错位的悬停位,不能用来判断);
+   Invoke 该按钮 → 主页 tab 重新激活、树随之恢复,tab 数回到 8。
+
+**单篇耗时**: 解锁态参考首次实测 Invoke→文章页就绪 ≈6s;锁屏态依赖 kick(见下)
+≈23~28s;树扫描 ≈2s;关 tab ≈2.5s;**合计 ≈47~53s/篇(锁屏)**,解锁预计 12~20s。
+
+**可重复性**: `--times 2` 连续两轮 **2/2 成功**,URL 与首轮完全一致;`--index 2` 换一篇
+同样成功。收尾后 tab 数恢复 8、主页 doc=`中金点睛`,无残留。
+
+## 过程中新踩的坑(后续实现必读)
+
+1. **锁屏(LockApp.exe 前台)下合成输入全部失效**(尖峰B'' 已见),但 **UIA Pattern 动作
+   照常可用**(Invoke/读属性/ShowWindow)—— 本路线全程不需要键鼠与剪贴板,锁屏下完整跑通。
+2. **新开 tab 后内容 a11y 树经常不 realization**(全窗仅 ~122 节点、0 个
+   `Chrome_RenderWidgetHostHWND`,等待 30s+ 也未必自愈)。**解法:`ShowWindow(hwnd,
+   SW_MINIMIZE)`→`SW_RESTORE` kick 一次即恢复**(955 节点);ShowWindow 是直发消息,
+   锁屏下有效,不属合成输入。已封装 `kick_window()`,打开文章后轮询落空即逐窗口 kick。
+3. **uiautomation 2.0.29 API 双坑**:① PatternId 成员名无 `Id` 后缀(`uia.PatternId.
+   InvokePattern`,不是 `InvokePatternId`);② `GetInvokePattern()` 只是部分 ControlType
+   (Button/Image 等)的方法,**GroupControl 等没有该方法(AttributeError)**——统一用
+   `ctrl.GetPattern(uia.PatternId.InvokePattern)`(支持面返回 None,不支持抛异常,均需兜住)。
+   尖峰B'' 的「`GetInvokePattern()` 是唯一可靠通道」结论仍对,但实现必须走 `GetPattern`。
+4. **AppEx 顶层窗口 Z 序不稳定**:同一 pid 下 `Chrome_WidgetWin_0` 窗口列表顺序会在
+   操作间翻转,任何「取第一个/取最大」的窗口选择都不可靠,必须按宿主内容筛选。
+5. **枚举瞬时为空**:个别 `GetRootControl().GetChildren()` 会瞬时返回不含 AppEx 窗口的
+   结果(锁屏切换期),需要带重试(1s×4)。
+6. 文章页 URL 承载节点是 **HyperlinkControl(ControlType=50030)**:一篇中 1~2 个节点
+   (其一 Name=文章标题,另一为页内链接如小程序入口「点击小程序查看报告原文」),
+   `ValuePattern.Value` 与 `LegacyIAccessible.Value` 同值;列表页(主页)依旧 0 个(尖峰B'
+   结论不变)。**已测样本仅 2 篇,均为含页内链接的研报文章**;不含任何链接的文章是否
+   也暴露待增量验证(风险:极简排版文章可能无承载节点 → 失败时回退「无 URL 入库」即可,
+   不阻塞主流程)。
+7. 主页在文章 tab 打开期间树会折叠(懒 realization),关闭文章 tab 后自动恢复 ——
+   不要误判为环境损坏;反之**不要**在文章 tab 激活时去找主页控件。
+
+## 其余手段(按序应试,手段1 成功即停)
+
+- **手段2(右键菜单复制链接)/ 手段3(更多面板)/ 手段4(在浏览器打开读进程命令行)**:
+  未执行。手段1 已成立且零输入依赖;且当前锁屏状态下右键/悬停等合成输入(手段2/3 的
+  前置)不可用,手段4 还会拉起浏览器进程,均劣于手段1。剪贴板全程未触碰。
+
+## 结论(Gate C)与架构建议
+
+**URL_ENHANCE_WORKS(手段1 变体)**。最终架构定为:
+**UIA 抓主页列表「标题+日期分组」做增量判定 → 仅对新增文章逐篇 Invoke 卡片打开 →
+文章页树扫 ValuePattern 提取 canonical URL(5 参数精简式去重,存全参数)→ 关 tab 还原 →
+入库(标题/日期/正文全文/URL)**。URL 提取失败的文章按「无 URL」降级入库,不阻塞批次;
+每篇预算 ≤60s(解锁态 ~15s),仅对增量执行,风控风险与人工逐篇打开等同。
+
+
