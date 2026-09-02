@@ -164,3 +164,78 @@ UIA 暴露」,**「UIA 驱动 + mitmproxy 被动抓包」组合无法产出文�
 7. 系统代理开关脚本对全局应用生效(本次在线约 30 分钟),下次尽量压缩窗口期,优先把抓包
    钩子全部就位后再开代理。
 
+---
+
+# 可行性尖峰B' —— 备选路线探测:UIA 直读文章 URL / CDP 挂载 AppEx(2026-09-03)
+
+- **环境**: Windows 11 / 微信 4.1.12.55(已登录,系统代理已还原关闭)/
+  Python 3.12 + uiautomation 2.0.29(venv)
+- **背景**: 尖峰A 判定「文章 URL 不经 UIA 暴露」时只看了控件 Name/aid,未穷举属性;
+  尖峰B 判定被动抓包不可行。本尖峰按优先级验证两条备选路线:
+  **路线A** = 穷举文章条目的 UIA 属性/模式拿 href;**路线B** = 找 DevTools 入口用 CDP 挂载。
+- **产物**: `tools/spike_url_extract.py`(属性/模式穷举器);
+  证据 `data/spike_url_dump.txt`(条目相关 105 候选节点)、
+  `data/spike_url_dump_all.txt`(主页可见树全量 271 节点,均 gitignore)
+- **Gate B' 结论:双双失败(BOTH_FAIL)** —— 在「不重启微信、不加启动参数、不注入」约束下,
+  本机微信 4.1.12.55 **不存在已验证的文章 URL 获取通道**。Task 4+(采集/解析)的输入假设需重议。
+
+## 路线A:穷举文章条目 UIA 属性 —— 失败(证据充分)
+
+| 项 | 实测值 |
+| --- | --- |
+| 穷举方法 | uiautomation 自带的 comtypes `IUIAutomationElement` 定义**不含** `GetSupportedProperties()`/`GetSupportedPatterns()`(AttributeError)→ 改为暴力遍历 `uia.PropertyId` 全部 173 个 ID 逐一 `GetCurrentPropertyValueEx(pid, True)`(自动过滤默认值)、`uia.PatternId` 全部 34 个 ID 逐一 `GetPattern` 并读取模式属性(ValuePattern.Value、LegacyIAccessible.Value/Description/Help/Name/DefaultAction/Role/State、AriaProperties(30126)/AriaRole(30125)/FullDescription(30159)/ItemType(30021) 等);按 ControlType 缓存「连续未命中」控制 COM 往返量 |
+| 覆盖面 | 中金点睛主页可见树**全量 271 节点**(含 11 个 `article__item__title` 标题及其 4 级父链、全部 Hyperlink/链接类控件),无一遗漏 |
+| URL 命中 | **0 个 `mp.weixin.qq.com/s?__biz=…`**。全树唯一的 URL 是头像图 `https://wx.qlogo.cn/mmhead/...132&from=57`(经 AriaProperties/LegacyIAccessible 泄漏) |
+| 结构证据(为何拿不到) | ① 标题 `AriaRoleProperty='heading'`、`AriaProperties='readonly=true;…hasactions=false'`,是标题不是链接;② 条目卡片 class=`js_article_card other_item article_item`——`js_` 前缀即「JS 绑定点击」,DOM 里**本来就没有 `<a href>`**;③ 连 class 带 link 的 `profile_album__item_link` 也被暴露为 `AriaRole='group'`、`LegacyIAccessible.Value=''`、`DefaultAction='按'`;④ 提供者描述 `[pid:29204 … Unidentified Provider (unmanaged:flue.dll)]`——UIA 树由腾讯 **flue.dll** 提供,不是原生 Chromium a11y 桥,href 一律不映射 |
+| 模式面 | 271 节点仅 3 种模式:`TextChildPattern`/`ScrollItemPattern`/`LegacyIAccessiblePattern`,外加 1 个卡片有 `InvokePattern`(DefaultAction='按');无 ValuePattern/ObjectModelPattern/TextPattern |
+
+**判定:路线A不成立。** 「Chromium 经常把 href 暴露给辅助功能树」在 XWeb(flue.dll 提供)上不成立,
+且 DOM 层面列表条目本就是 JS 点击而非锚点;继续穷举 UIA 属性无增益。
+
+## 路线B:CDP 挂载 AppEx —— 无 DevTools 入口,未挂载
+
+| 探测手段 | 实测值 |
+| --- | --- |
+| `DevToolsActivePort` 文件 | `%APPDATA%\Tencent`(含 `xwechat`)、`%LOCALAPPDATA%\Tencent`、`%USERPROFILE%\xwechat_files` 递归 **depth 9** 全扫,2 秒内遍历完毕,**0 命中** |
+| 进程命令行 | 23 个 `WeChatAppEx.exe` 进程参数全量归并(共 30 种 switch):只有 `--type/--wmpf/--enable-features/--disable-features/--product-id/…`,**无任何** `--remote-debugging-port/--remote-debugging-pipe/--devtools/--inspect` |
+| 监听端口 | `netstat -ano` 全量 LISTENING 与 21 个 AppEx + 6 个 Weixin pid 求交:**AppEx 各进程 0 监听**;`Weixin.exe` 主进程(pid 43448)监听 `127.0.0.1:14013/14016/14019/14022/14023` |
+| 主进程端口试探 | 5 个端口逐个 `curl /json/version` + `GET /`:**全部 `http_code=000`**(连接建立即被对端断开,无任何 HTTP 响应)——私有 mmrpc/长链辅助端口,不是 DevTools |
+| 约束遵守 | 按任务约束**未**重启微信、**未**加启动参数(不影响用户环境)→ CDP 挂载无路径,`Network.enable` 捕获与 `data/spike_cdp_list_sample.json` 未产生;`websocket-client` 无需安装 |
+
+**判定:路线B不成立(入口不存在)。**
+
+## 附带观察(重议架构时需要知道)
+
+1. **网页控件 rect 的坐标语义可疑(新发现的坑)**:`Chrome_RenderWidgetHostHWND` 宿主 rect
+   `(0,52,1163,1137)` 以客户区为原点,而其顶层窗口 rect=`(490,85,1670,1230)` 是屏幕坐标;
+   网页控件 y 高达 5132(文档坐标,含滚动偏移)、x 又落在客户区范围(855–1206)。
+   本次按 rect 中心 `mouse_event` 点击标题 **4 次均未能打开文章页**(点击点落在屏幕外/错位)
+   ——尖峰A「Task 9 流程」里「Invoke 标题打开文章」「tab 按坐标点击」两步在当前窗口布局下
+   **未能复现**,实现前必须重测坐标换算(窗口 offset + 客户区 + 视口滚动)。
+2. **AppEx 有多个顶层窗口**:除主窗口 `微信`(8 个 Tab 堆积,印证尖峰B 备注)外,还有
+   `中金点睛` 窗口(520×979,doc=`AppIndex`)。`find_browser_window()` 按面积取最大者可能选错,
+   应按激活宿主的 DocumentControl Name 过滤。
+3. **本地缓存取证初查为负**:AppEx 的 Chromium 缓存 `%APPDATA%\Tencent\xwechat\radium\cache`
+   仅 1.6MB 且 grep 不到 `mp.weixin.qq.com/s`;`business/xweb` 只有 mmkv 配置;
+   `xwechat_files/<wxid>/cache/YYYY-MM/Message` 是聊天文件缓存 → 尖峰B 候选 3「文章 HTML 落在
+   本地缓存可离线解析」在初查下不成立(未穷尽全盘)。
+4. uiautomation 2.0.29 穷举全部属性/模式的可行做法已沉淀在 `tools/spike_url_extract.py`
+   (暴力 PropertyId/PatternId 遍历 + 未命中缓存),可复用于其他 XWeb 页面。
+
+## 结论(Gate B')
+
+**BOTH_FAIL** —— 路线A(UIA 属性穷举)与路线B(CDP 挂载)都不通。结合尖峰B(被动抓包不可行),
+三条低成本路线全部排除。剩余候选(成本/风险递增,均未验证):
+
+1. **文章页「复制链接」剪贴板兜底**:逐篇 Invoke 标题 → 打开 native 分享面板 → 复制链接 →
+   读剪贴板。缺点:面板在 Qt 主窗口(不可 UIA 寻址,只能盲点)、每篇 ≥8s、高频触发易风控;
+   且附带观察 1 表明当前坐标点击不可靠,需先解决。
+2. **协议层逆向 mmtls 长链**:成本与风控风险最高,不推荐。
+3. **重定项目产物**:若文章自身链接非硬需求,UIA 已可全量拿到「标题+日期分组+正文全文」
+   (尖峰A 已证实 `js_content` 单页 837 控件/21000px 可读)——最小可用采集器可以不依赖 URL;
+   文章去重可改用标题+发布时间的哈希。
+
+**对架构的影响:Task 4+ 需重议。** 在「不重启微信、不加启动参数、不注入」的约束下,
+本机微信 4.1.12.55 无已验证的文章 URL 获取通道;建议按候选 3(重定产物)+ 候选 1(可选增强)
+推进,并把「坐标换算重测」列为 Task 9 的前置验证项。
+
