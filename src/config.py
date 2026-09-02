@@ -50,12 +50,19 @@ def load_config(settings_path=DEFAULT_SETTINGS,
     if not accounts_path.exists():
         raise ConfigError(f"找不到名单文件: {accounts_path}")
     s = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(s, dict):
+        raise ConfigError(f"{settings_path} 内容必须是键值映射")
     a = yaml.safe_load(accounts_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(a, dict):
+        raise ConfigError(f"{accounts_path} 内容必须是键值映射")
     wechat = s.get("wechat") or {}
     crawl = s.get("crawl") or {}
     article = s.get("article") or {}
     run = s.get("run") or {}
-    accounts = [str(x).strip() for x in (a.get("accounts") or []) if str(x).strip()]
+    raw_accounts = a.get("accounts")
+    if raw_accounts is not None and not isinstance(raw_accounts, list):
+        raise ConfigError("accounts.yaml 的 accounts 必须是列表(每行 '- 名称')")
+    accounts = [str(x).strip() for x in (raw_accounts or []) if str(x).strip()]
     if not accounts:
         raise ConfigError("accounts.yaml 未配置任何公众号")
     cfg = CrawlConfig(

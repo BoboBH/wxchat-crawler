@@ -45,6 +45,8 @@ def test_load_ok(tmp_path):
     assert cfg.stop_streak == 3
     assert cfg.account_gap_min_sec == 20
     assert cfg.article_open_timeout_sec == 40
+    assert isinstance(cfg.scroll_wait_sec, float)
+    assert isinstance(cfg.article_open_timeout_sec, float)
     assert cfg.db_path == Path("data/crawler.db")
     assert cfg.accounts == ["中金点睛", "郭磊宏观茶座"]
 
@@ -63,6 +65,18 @@ def test_missing_accounts_file(tmp_path):
 def test_empty_accounts(tmp_path):
     sp, ap = _write(tmp_path, accounts="accounts: []\n")
     with pytest.raises(ConfigError, match="未配置任何公众号"):
+        load_config(sp, ap)
+
+
+def test_scalar_accounts(tmp_path):
+    sp, ap = _write(tmp_path, accounts="accounts: 中金点睛\n")
+    with pytest.raises(ConfigError, match="必须是列表"):
+        load_config(sp, ap)
+
+
+def test_scalar_root(tmp_path):
+    sp, ap = _write(tmp_path, settings="42\n")
+    with pytest.raises(ConfigError, match="键值映射"):
         load_config(sp, ap)
 
 
