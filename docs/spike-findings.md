@@ -95,10 +95,72 @@
 
 ---
 
-## 尖峰B（抓包/协议层）预留
+# 可行性尖峰B —— mitmproxy 截获公众号文章列表接口验证(2026-09-02)
 
-- 【待 Task 3】文章真实 URL 抓取方式（Fiddler/mitmproxy 证书安装 + 微信流量过滤规则）
-- 【待 Task 3】历史列表「加载更多」的网络请求接口（request 参数/签名、翻页游标）
-- 【待 Task 3】公众号 biz / uin / key 等会话参数的有效期与刷新方式
-- 【待 Task 3】抓包代理与 UIA 驱动的协同流程（谁触发翻页、谁采集 URL）
-- 【待 Task 3】频控/风控观测：安全翻页速率、账号异常告警信号
+- **环境**: Windows 11 / 微信 4.1.12.55(已登录)/ mitmproxy 12.2.3(venv)/ 系统代理 127.0.0.1:8888
+- **产物**: `tools/spike_set_proxy.ps1`(系统代理开关)、`tools/spike_capture_addon.py`(采集插件)、
+  `tools/spike_install_cert.py`(证书弹窗自动化)、`tools/spike_navigate.py`(UIA 导航)、
+  `tools/spike_scroll_probe.py`(滚动探针)、`tools/spike_article_probe.py`/`tools/spike_final_probe.py`(综合探针);
+  证据 `data/spike_mitmdump.log`、`data/spike_cap/`(39+ 份真实响应)、`data/spike_shot_before/after.png`、
+  `data/spike_final_end.png`
+- **Gate B 结论:失败(有价值的失败)** —— 系统代理路线**无法截获文章列表数据接口**;
+  local 模式未执行(shell 非管理员,且本案不满足计划设定的回退前提,见下)。
+  **未产生 `tests/fixtures/profile_ext_real.json` / `article_list_real.json`**(截获条件未达成,按计划不建)。
+
+## 实测结果
+
+| 项 | 实测值 |
+| --- | --- |
+| CA 证书安装 | `certutil -user -addstore root` 弹出「安全警告」(#32770)对话框,uiautomation 程序化点击「是(Y)」**成功**(快照前后差集定位新对话框,等待约 1s 即出现);`certutil -store -user root mitmproxy` 验证通过。证书保留在用户根存储,清理命令:`certutil -user -delstore root mitmproxy` |
+| 代理方式 | 用户级系统代理(HKCU `ProxyEnable=1` + `ProxyServer=127.0.0.1:8888`,脚本 `spike_set_proxy.ps1`,InternetSetOption 39/37 通知生效) |
+| AppEx 是否走系统代理 | **是**。`netstat -ano` 证实 `WeChatAppEx.exe`(pid 26472,`--type=utility --utility-sub-type=network.mojom.NetworkService`,隶属 xwechat RadiumWMPF 运行时)与 127.0.0.1:8888 建立 ESTABLISHED 连接;mitmdump 日志可见其 HTTP/2 请求 |
+| 走代理可见的流量 | ① 页面壳:`GET channels.weixin.qq.com/web/pages/mp_profile?biz=…`(新版公众号主页 HTML,首次 200,二次 304 Not Modified——Chromium 磁盘缓存);② 静态资源:`finder.video.qq.com`/`findermp.video.qq.com/251/2030x/stodownload`(封面图 jpg、视频 mp4);③ 埋点上报:`mp.weixin.qq.com/mp/jsmonitor`(GET/POST,高频)、`channels.weixin.qq.com/web/report-perf`、`badjs.weixinbridge.com/frontend/reportspeed`、`support.weixin.qq.com/cgi-bin/mmsupport-bin/reportforweb`、`oss.work.weixin.qq.com/cgi-bin/oss_log` |
+| **走代理不可见的流量(关键)** | ① 主页列表增长(UIA 标题数 11→24)与 tab 切换(全部/文章/视频号/贴图)期间**零新增 HTTP 请求**;② 打开文章页(《货币的秩序》第十五章,截图 `spike_final_end.png` 证实正文完整渲染)全程**无 `mp.weixin.qq.com/s?__biz=…` 请求**(3 次不同文章、两种点击方式复测);③ `Ctrl+R` 刷新主页零请求。已排除证书不信任(AppEx 对 mp.weixin.qq.com 的 TLS 中间人握手成功,jsmonitor 等正常解密) |
+| 列表数据通道推断 | 列表翻页与文章正文经**微信客户端私有通道**注入 WebView:mitmdump 日志存在对 raw-IP 的 CONNECT 透传流(`111.63.206.76:443` 长链,持续小流量,表现为 `-> tcp ->` 非 HTTP 流),即 Weixin 主进程 mmtls 长链桥接(XWeb `XWorker` 特性);不排除部分为 QUIC/HTTP3 直连(HTTP 代理天然不可见) |
+| 老接口对照 | 全程未出现 `/mp/profile_ext?action=getmsg`。**4.x 公众号主页由 `channels.weixin.qq.com/web/pages/mp_profile` 承载**(新版统一主页,顶部 tab=视频号/文章/贴图,网格卡片布局,文章封面走 finder CDN)。**Task 6/7 的解析器目标不能假设 profile_ext JSON**;即使换路线,样本结构也应以 `mp_profile` 页面壳/内嵌数据为准 |
+| local 模式 | **未执行**:shell 非管理员(`IsInRole(Administrator)=False`,`net session` 拒绝),WinDivert 无法加载。且计划中 local 是「AppEx 完全无 [spike] 行」时的回退——本案 AppEx 有大量 [spike] 行,代理链路本身是通的,缺失的是数据接口不经 HTTP;local 重定向看到的仍是同一批 TCP,mmtls 载荷不可解,预期增益≈0 |
+
+## 结论(Gate B)
+
+**BLOCKED(就「被动抓包取文章 URL/列表」这一路线而言)** —— mitmproxy 系统代理可以截获
+微信内嵌浏览器的**页面壳、静态资源与埋点流量**(TLS 中间人完全成功),但**文章列表翻页接口
+与文章正文页请求均不经 HTTP 代理通道**,被动抓包拿不到文章 URL。结合尖峰A「文章 URL 不经
+UIA 暴露」,**「UIA 驱动 + mitmproxy 被动抓包」组合无法产出文章链接**,Task 4+(采集器、
+解析器)的输入假设需重估。候选替代路线(未验证,供决策):
+
+1. **XWeb 远程调试**:WeChatAppEx 命令行未见 `--remote-debugging-port`,但 XWeb 系 Chromium
+   内核,若能以调试端口/DevTools 协议接入,可直接读 DOM 拿 `<a href>`;
+2. **页面 DOM/UIA 深挖**:文章页 a11y 树可读 `activity-name`/`js_content` 等 aid,但未验证
+   HyperlinkControl 是否暴露 `Value.Value`(URL)——成本低,值得先试;
+3. **本地缓存取证**:文章 HTML/列表数据既经客户端下发,大概率落在 `xwechat_files`/
+   RadiumWMPF 的本地缓存(SQLite/CDN 缓存目录),可离线解析;
+4. **协议层逆向(不推荐)**:mmtls 私有协议,成本与风控风险高。
+
+## 复现步骤(本次实际执行序)
+
+1. `.venv/Scripts/mitmdump.exe --listen-port 8888` 跑 8s 生成 `%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.cer`,kill;
+2. `python tools/spike_install_cert.py <cer>` 自动点弹窗安装证书并验证;
+3. 起 `mitmdump -s tools/spike_capture_addon.py`(日志 `data/spike_mitmdump.log`)→
+   `powershell -File tools/spike_set_proxy.ps1` 开代理(reg 验证 ProxyEnable=1);
+4. `python tools/spike_navigate.py`:UIA 搜索「中金点睛」→ Invoke `header-detail` 卡片 →
+   主页滚轮加载(标题数 11,轮询平台期);
+5. `tools/spike_scroll_probe.py`(计数+截图)、`tools/spike_article_probe.py`(进程映射/tab 枚举/
+   重进主页/点文章)、`tools/spike_final_probe.py`(回退/刷新/坐标点击)逐步排除变量;
+6. `spike_set_proxy.ps1 -Off` **还原并 reg 验证 ProxyEnable=0x0**,kill mitmdump,关闭测试打开的文章窗口。
+
+## 工具链备注(下次自动化直接可用)
+
+1. uiautomation 2.0.29 **没有 `Control.Invoke()`**,按钮触发要走 `ctrl.InvokePattern.Invoke()`
+   (失败再退化为坐标 `Click`);`GetValuePattern().Value` 可读搜索框回显;
+2. Chromium a11y 树是**懒 realization**:列表滚动后标题数增长≠发起了翻页请求(本次 11→24
+   的增长发生在零请求期间),「翻页成功」必须以网络层证据为准;
+3. tab 无 Name,只能按 `Tab` 控件 `BoundingRectangle` 中心坐标点击;每次卡片 Invoke 都会新开 tab,
+   连续导航会堆积 8+ 个 tab,tab 条溢出后坐标点击不再可靠——脚本应先 Ctrl+W 清理;
+4. `Alt+Left` 不会使 AppEx 页面历史回退;`Ctrl+R` 不产生网络请求(疑似整页走缓存/桥接);
+5. 剥 `If-None-Match`/`If-Modified-Since`(mitmproxy `requestheaders` 钩子,已内置于
+   spike_capture_addon.py)可强制服务器回 200 完整体,破解 Chromium 304——本次因无法再次触发
+   `mp_profile` 导航而未验证成功,下次在**首次导航前**就装好该钩子;
+6. mitmdump 日志含 GBK 乱码(Git Bash 管道),判定以 exit code 与 ASCII 关键字(NOT_FOUND 等)为准;
+7. 系统代理开关脚本对全局应用生效(本次在线约 30 分钟),下次尽量压缩窗口期,优先把抓包
+   钩子全部就位后再开代理。
+

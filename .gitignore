@@ -7,3 +7,5 @@ data/.current_account
 data/spike_profile_ext.json
 logs/*
 !logs/.gitkeep
+data/spike_*
+tools/__pycache__/
