@@ -112,7 +112,6 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
     (不复用已开的旧 tab):旧 tab 列表不刷新,会导致每轮扫到同一份旧列表、
     0 新增、水位线永久冻结。
     """
-    t_acc = time.perf_counter()
     log.info("[%s] 开始处理账号%s", name, f"({position})" if position else "")
     acc_id = store.get_or_create_account(name)
     watermark = store.watermark(acc_id)
