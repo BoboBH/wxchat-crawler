@@ -21,9 +21,11 @@ D:\Python312\python.exe -m venv .venv
 ## 一次性部署
 
 1. 启动 PC 微信并扫码登录(保持运行)。
-2. **在微信中点开一次「搜一搜」**(放大镜),让内置浏览器窗口保持一个
-   搜索页 tab —— 脚本每次搜索都复用它,不需要每次人工干预。
-   或运行 `.venv\Scripts\python.exe tools\bootstrap_search.py`
+2. (可选)在微信中点开一次「搜一搜」(放大镜),让内置浏览器窗口保持一个
+   搜索页 tab —— 脚本每次搜索都复用它。搜索页 tab 被微信回收时爬虫会自动
+   引导重开(聚焦微信主窗 → Ctrl+F → 粘贴账号名;若微信主窗无法置前则
+   跳过合成键,本轮账号失败、下轮重试),不需要人工干预。
+   也可运行 `.venv\Scripts\python.exe tools\bootstrap_search.py`
    由脚本代开(需桌面解锁)。
 3. 自检:`.venv\Scripts\python.exe run_crawl.py --check`
    → 应输出「OK,可以抓取」。

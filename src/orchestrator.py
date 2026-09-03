@@ -89,7 +89,7 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
                   timedelta(days=cfg.overlap_days)).isoformat()
 
     ok, msg = bot.search_open_profile(name)
-    if not ok and "未找到搜索页" in (msg or ""):
+    if not ok and bot.SEARCH_PAGE_MISSING in (msg or ""):
         # AppEx 搜索页 tab 会被微信在数小时内回收:自动引导一次再重试,
         # 不再因该原因整轮失败(2026-09-03 实测两账号同因失败)。
         log.info("[%s] 搜索页丢失,尝试自动引导...", name)

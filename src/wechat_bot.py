@@ -59,6 +59,9 @@ K32.GlobalLock.restype = ctypes.c_void_p
 K32.GlobalUnlock.argtypes = [ctypes.c_void_p]
 # 搜索页引导(主窗热键):4.1.12.55 实证 {Ctrl}f 有效,{Ctrl}k 为备选
 BOOTSTRAP_HOTKEYS = ("{Ctrl}f", "{Ctrl}k")
+# 自愈触发串:本模块发出、orchestrator 以子串匹配 —— 措辞必须走本常量,
+# 直接改字符串会静默禁用自愈(回归锚点见 tests/test_wechat_bot_bootstrap.py)
+SEARCH_PAGE_MISSING = "未找到搜索页"
 MAIN_WINDOW_PROCESS = "weixin.exe"               # 微信主进程映像名
 LOCK_PROCESSES = ("lockapp.exe", "logonui.exe")  # 锁屏/登录界面 → 合成键鼠不可达
 
@@ -387,7 +390,7 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
     """
     win, host, edit = find_search_entry()
     if edit is None:
-        return False, "未找到搜索页(weixin-search-input);请先在微信中打开一次「搜一搜」"
+        return False, f"{SEARCH_PAGE_MISSING}(weixin-search-input);将尝试自动引导「搜一搜」"
 
     def is_account_card(c) -> bool:
         """结果页公众号卡片:同名前缀的小程序/文章卡片(实测同名开头)必须排除,
@@ -473,7 +476,8 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
 # ---------------------------------------------------------------- 搜索页引导(自愈)
 
 def desktop_state() -> str:
-    """'locked' | 'no-foreground' | 'ok':合成键鼠只在前台正常时有效。"""
+    """'locked' | 'no-foreground' | 'ok' | 'unknown'(探测异常):
+    合成键鼠只在前台正常('ok')时有效。"""
     try:
         fg = USER32.GetForegroundWindow()
         if not fg:
@@ -512,13 +516,19 @@ def _force_foreground(hwnd: int) -> bool:
 
 
 def _main_window_candidates() -> list:
-    """微信主进程的顶层窗口(AppEx 的 Chrome_WidgetWin_0 除外)。"""
+    """微信主窗口候选:weixin.exe 顶层窗口中类名以 Qt 开头且 Name=微信 者。
+
+    只按「进程名 + 非 AppEx 类」筛不够:最大化的独立聊天窗(同为 weixin.exe
+    的 Qt 窗)面积可压过主窗,合成热键/粘贴会落进聊天。主窗的文档化身份即
+    类名形如 Qt51514QWindowIcon、Name=微信,三者必须同时满足;一个都不满足
+    时自愈安全失败(宁不引导,不误键入)。"""
     out = []
     try:
         for c in uia.GetRootControl().GetChildren():
             try:
                 if process_name(c.ProcessId).lower() == MAIN_WINDOW_PROCESS and \
-                        (c.ClassName or "") != APP_CLASS:
+                        (c.ClassName or "").startswith("Qt") and \
+                        (c.Name or "") == "微信":
                     out.append(c)
             except Exception:
                 continue
@@ -527,36 +537,52 @@ def _main_window_candidates() -> list:
     return out
 
 
-def _focus_main() -> tuple[bool, str]:
-    """激活微信主窗口(Weixin.exe 顶层非 AppEx 窗口中面积最大者,
-    类名形如 Qt51514QWindowIcon、Name=微信)。返回 (是否找到主窗口, 说明)。
-    置前失败不中止:合成热键仍值得一试,由调用方把说明并入结果消息。"""
+def _foreground_is(hwnd: int) -> bool:
+    """前台窗口是否恰为目标句柄(合成键发送前的最后校验)。"""
+    try:
+        fg = USER32.GetForegroundWindow()
+        return bool(fg) and int(fg) == int(hwnd)
+    except Exception:
+        return False
+
+
+def _focus_main() -> tuple[int | None, str]:
+    """激活微信主窗口(_main_window_candidates 候选中面积最大者,
+    类名形如 Qt51514QWindowIcon、Name=微信)。返回 (主窗句柄, 说明):
+    句柄仅在 _force_foreground 实际置前成功时非 None,失败/异常一律 None ——
+    主窗 Qt 树为空无法读回粘贴目标,前台比对是合成键入的唯一防线,
+    置前失败时绝不能发键(Ctrl+A/V/Enter 落进用户前台应用是破坏性的)。"""
     cands = _main_window_candidates()
     if not cands:
-        return False, f"未找到微信主进程({MAIN_WINDOW_PROCESS})的顶层主窗口"
+        return None, f"未找到微信主进程({MAIN_WINDOW_PROCESS})的顶层主窗口"
     try:
         win = max(cands, key=lambda c: max(
             (c.BoundingRectangle.right - c.BoundingRectangle.left) *
             (c.BoundingRectangle.bottom - c.BoundingRectangle.top), 0))
         USER32.ShowWindow(win.NativeWindowHandle, 9)  # SW_RESTORE
         time.sleep(0.5)
-        ok = _force_foreground(win.NativeWindowHandle)
-        time.sleep(1.0)
-        return True, "" if ok else "主窗口未能置前(仍尝试热键)"
+        if not _force_foreground(win.NativeWindowHandle):
+            return None, "主窗口未能置前"
+        time.sleep(1.0)  # 置前 settle;此窗口期用户仍可能抢回焦点,发键前再复核
+        return win.NativeWindowHandle, ""
     except Exception as exc:
-        return True, f"主窗口聚焦异常({exc})(仍尝试热键)"
+        return None, f"主窗口聚焦异常({exc})"
 
 
 def _bootstrap_once(account: str, shortcut: str, poll_sec: float) -> tuple[bool, str]:
-    """单次引导:主窗聚焦 → 合成热键聚焦微信搜索 → 粘贴账号名 → Enter →
-    轮询 AppEx 里出现搜索页输入框(即「搜一搜」tab 被重新打开)。"""
+    """单次引导:主窗聚焦并复核前台 → 合成热键聚焦微信搜索 → 粘贴账号名 →
+    Enter → 轮询 AppEx 里出现搜索页输入框(即「搜一搜」tab 被重新打开)。
+    聚焦失败/前台被抢占的一律不发键,宁自愈失败不误写用户前台应用。"""
     try:
         state = desktop_state()
         if state != "ok":
             return False, f"桌面状态={state}(锁屏/无前台窗口),合成键鼠不可达"
-        found, focus_msg = _focus_main()
-        if not found:
-            return False, focus_msg
+        hwnd, focus_msg = _focus_main()
+        # _focus_main 置前后留了 settle 窗口期,用户可能已抢回焦点:主窗
+        # UIA 树为空无粘贴目标可读回,发键前最后一次前台比对是唯一防线。
+        if not hwnd or not _foreground_is(hwnd):
+            tail = f";{focus_msg}" if focus_msg else ""
+            return False, f"主窗口未置前,跳过合成键(避免误入其他应用){tail}"
         uia.SendKeys(shortcut)
         time.sleep(1.0)
         uia.SetClipboardText(account)
