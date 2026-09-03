@@ -39,6 +39,22 @@ D:\Python312\python.exe -m venv .venv
 - `config/accounts.yaml` — 公众号名单,`accounts:` 键下每行一个 `- 名称`。
 - `config/settings.yaml` — 停止条数、重叠天数、账号间隔、超时等。
 
+## 钉钉推送
+
+每抓到一篇新文章 URL,立即逐篇推送一条 markdown 消息到钉钉群(不聚合)。
+配置统一在 `config/settings.yaml` 的 `notify:` 段:
+
+- `enabled` — 总开关;`webhook` — 自定义机器人地址(含 access_token,勿外传);
+- `secret` — 机器人安全设置选「加签」时填 `SEC` 开头密钥,其余模式留空;
+- `keyword` — 安全设置选「自定义关键词」时,每条消息必含该词;
+- `at_user_ids` — 要@的 userId 列表(应用机器人的 userId 也填这里,真 @);
+- `at_robot_name` — 机器人群昵称(正文补 `@昵称` 文本兜底);
+- `at_mobiles` — 要@的人的手机号;`at_all` — @所有人(逐篇推送,慎开)。
+
+发送间隔内置 3 秒限流兜底(钉钉上限 20 条/分钟);推送失败只写告警日志,
+不影响抓取主流程。连通性自测:
+`.venv\Scripts\python.exe tools\dingtalk_test.py [文章URL]`
+
 ## 查看数据
 
 ```

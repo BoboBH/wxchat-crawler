@@ -1,4 +1,4 @@
-"""配置加载:settings.yaml(参数)+ accounts.yaml(公众号名单)。"""
+"""配置加载:settings.yaml(参数+钉钉通知)+ accounts.yaml(公众号名单)。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -34,12 +34,59 @@ class CrawlConfig:
     db_path: Path
     log_dir: Path
     accounts: list[str] = field(default_factory=list)
+    notify: "NotifyConfig" = field(default_factory=lambda: NotifyConfig())
+
+
+@dataclass
+class NotifyConfig:
+    """钉钉逐篇推送配置(webhook/secret 也在本文件,注意勿外传)。"""
+
+    enabled: bool = False
+    webhook: str = ""
+    secret: str = ""            # 机器人安全设置选「加签」时的 SEC 密钥
+    keyword: str = ""           # 安全设置选「自定义关键词」时每条消息必含
+    at_robot_name: str = ""     # 要@的应用机器人「群昵称」(写入正文 @文本)
+    at_user_ids: list[str] = field(default_factory=list)  # userId(可@机器人)
+    at_mobiles: list[str] = field(default_factory=list)   # 手机号(真@提醒)
+    at_all: bool = False
 
 
 def _require(d: dict, key: str, where: str):
     if key not in d or d[key] is None:
         raise ConfigError(f"{where} 缺少字段 {key!r}")
     return d[key]
+
+
+def _parse_bool(v, where: str) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str) and v.strip().lower() in ("true", "false", "yes", "no", "1", "0"):
+        return v.strip().lower() in ("true", "yes", "1")
+    raise ConfigError(f"{where} 必须是布尔值(true/false),得到 {v!r}")
+
+
+def _parse_str_list(v, where: str) -> list[str]:
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise ConfigError(f"{where} 必须是列表(每行 '- 值'),得到 {v!r}")
+    return [str(x).strip() for x in v if str(x).strip()]
+
+
+def _parse_notify(n) -> NotifyConfig:
+    if n is not None and not isinstance(n, dict):
+        raise ConfigError("settings.notify 必须是键值映射")
+    n = n or {}
+    return NotifyConfig(
+        enabled=_parse_bool(n.get("enabled", False), "notify.enabled"),
+        webhook=str(n.get("webhook") or "").strip(),
+        secret=str(n.get("secret") or "").strip(),
+        keyword=str(n.get("keyword") or "").strip(),
+        at_robot_name=str(n.get("at_robot_name") or "").strip(),
+        at_user_ids=_parse_str_list(n.get("at_user_ids"), "notify.at_user_ids"),
+        at_mobiles=_parse_str_list(n.get("at_mobiles"), "notify.at_mobiles"),
+        at_all=_parse_bool(n.get("at_all", False), "notify.at_all"),
+    )
 
 
 def load_config(settings_path=DEFAULT_SETTINGS,
@@ -90,4 +137,7 @@ def load_config(settings_path=DEFAULT_SETTINGS,
         raise ConfigError("crawl.overlap_days 不能为负")
     if cfg.account_gap_min_sec > cfg.account_gap_max_sec:
         raise ConfigError("crawl.account_gap_min_sec 不能大于 account_gap_max_sec")
+    cfg.notify = _parse_notify(s.get("notify"))
+    if cfg.notify.enabled and not cfg.notify.webhook:
+        raise ConfigError("notify.enabled=true 但 notify.webhook 为空")
     return cfg

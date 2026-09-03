@@ -14,9 +14,9 @@ import time
 from contextlib import contextmanager
 from datetime import date, timedelta
 
-from . import canonical, version_check, wechat_bot as bot
+from . import canonical, notify as notify_mod, version_check, wechat_bot as bot
 from .canonical import find_stop_index, make_dedup_key, normalize_date_text, pair_publish_dates
-from .config import CrawlConfig
+from .config import CrawlConfig, NotifyConfig
 from .db import Store
 
 
@@ -104,13 +104,31 @@ def _collect_list(cfg: CrawlConfig, host, cutoff: str | None):
     return titles, pairs, dates
 
 
+def _make_pusher(notify_cfg: NotifyConfig, log: logging.Logger):
+    """逐篇推送回调;未启用或缺 webhook 返回 None(enabled 且空 webhook
+    已被 load_config 拦截,此处兜底照顾直接构造 CrawlConfig 的调用方)。"""
+    if not notify_cfg.enabled or not notify_cfg.webhook:
+        return None
+
+    def push(row: dict) -> None:
+        ok, msg = notify_mod.send_article(notify_cfg, row, log=log)
+        if ok:
+            log.info("[钉钉] 已推送: %s", row["title"][:40])
+        else:
+            log.warning("[钉钉] 推送失败(%s): %s", msg, row["title"][:40])
+
+    return push
+
+
 def process_account(store: Store, cfg: CrawlConfig, name: str,
-                    log: logging.Logger, position: str | None = None) -> dict:
+                    log: logging.Logger, position: str | None = None,
+                    push=None) -> dict:
     """抓一个账号,返回 {ok, new, upgraded, pending, message}。
 
     position 为「1/2」形式的序号(仅用于日志);主页每轮都经搜索重新打开
     (不复用已开的旧 tab):旧 tab 列表不刷新,会导致每轮扫到同一份旧列表、
-    0 新增、水位线永久冻结。
+    0 新增、水位线永久冻结。push 非空时,本轮取到 URL 的新增/升级文章
+    逐篇立即推送钉钉(推送失败仅告警,不影响抓取)。
     """
     log.info("[%s] 开始处理账号%s", name, f"({position})" if position else "")
     acc_id = store.get_or_create_account(name)
@@ -219,6 +237,10 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
         log.info("[%s] + %s (%s) url=%s → %s(用时%s)", name, title[:40],
                  date_text or "?", url_state, outcome,
                  fmt_duration(time.perf_counter() - t_art))
+        if push and canon and result in ("new", "upgraded"):
+            # 逐篇即推不聚合(用户要求);send_article 内部绝不抛异常
+            push({"account": name, "title": title, "url": canon,
+                  "date_text": date_text or ""})
         processed += 1
 
     if max_date:
@@ -246,6 +268,7 @@ def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
              f"(仅 {only_account})" if only_account else "")
     store = Store(cfg.db_path)
     run_id = store.start_run()
+    push = _make_pusher(cfg.notify, log)  # 未启用→None;推送不影响抓取主流程
     ok_n = fail_n = new_n = 0
     try:
         for i, name in enumerate(names):
@@ -257,7 +280,7 @@ def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
             t_acc = time.perf_counter()
             try:
                 st = process_account(store, cfg, name, log,
-                                     position=f"{i + 1}/{len(names)}")
+                                     position=f"{i + 1}/{len(names)}", push=push)
             except Exception:
                 log.exception("账号 %s 处理异常", name)
                 st = {"ok": False, "new": 0, "upgraded": 0, "pending": 0,
