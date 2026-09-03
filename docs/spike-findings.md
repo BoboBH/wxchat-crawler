@@ -401,4 +401,48 @@ UIA 暴露」,**「UIA 驱动 + mitmproxy 被动抓包」组合无法产出文�
 入库(标题/日期/正文全文/URL)**。URL 提取失败的文章按「无 URL」降级入库,不阻塞批次;
 每篇预算 ≤60s(解锁态 ~15s),仅对增量执行,风控风险与人工逐篇打开等同。
 
+### 追记(2026-09-03 验收/修复轮,提交 051f931 与后续)
 
+上两行结论有两处被验收实测**修正**:
+
+1. **chksm 不稳定**:同一篇(同 sn)三次提取得到**三个不同的 chksm** —— 它是
+   会话级签名,不是内容身份。「5 参数逐字节一致」应修正为:**canonical 只保留
+   `__biz/mid/idx/sn` 4 参数,chksm 必须剔除**(提交 `051f931`);否则同文每次
+   提取都会被当成新文章。
+2. **「每篇恰好 1 个 URL」不成立**:郭磊宏观茶座「【广发宏观陈嘉荔】沃什
+   Jackson Hole演讲的新信号」一篇,页面树内嵌 **475 个** mp URL(推荐阅读/
+   目录类内链),「最短者即主文」取到的是**另一篇** —— 详见尖峰D。
+
+
+
+---
+
+# 可行性尖峰D —— 文章页「··· → 复制链接」菜单取页面自身 URL(2026-09-03)
+
+- **环境**: Windows 11 / 微信 4.1.12.55(已登录,桌面解锁)/ uiautomation 2.0.29(venv)
+- **背景**: 验收发现「树内最短者即主文」会把内嵌链接记到本篇头上(污染页 475 个
+  mp URL,最短者是**另一篇**)。菜单「复制链接」按定义复制**当前页自身** URL,
+  验证其可编程触发性。产物:`tools/spike_copy_link.py`(含 `--dump/--probe/--menu-dump`
+  诊断模式),证据 `data/spike_copy_run*.log`(gitignore)。
+- **Gate D 结论:成立(2/2)** —— 全链路(AppMenuButton「更多」→ Click 弹层 →
+  `FlueMenuItemView Name=复制链接` → Invoke → 剪贴板读 URL → canonicalize 通过)
+  连续两次成功;已实现 `wechat_bot.copy_link_via_menu()` 兜底并接入主流程。
+
+## 实测要点
+
+| 项 | 实测值 |
+| --- | --- |
+| 菜单入口 | 浏览器工具条 `ButtonControl class='AppMenuButton' Name='更多'`(窗口右上,最小化/最大化旁)。**无 InvokePattern**;`ExpandCollapse.Expand()`、`LegacyIAccessible.DoDefaultAction()` 均不弹层;**只有合成鼠标 `Click` 能打开** → 锁屏轮次不可用 |
+| 弹层归属 | **无新顶层窗口**(root 窗口快照前后差集为空);菜单项就落在同一 AppEx 窗口树里:`ButtonControl class='FlueMenuItemView'`,实测项 = `收藏 Ctrl+D` / `转发…` / `复制链接` / `刷新 Ctrl+R`;`InvokePattern.Invoke()` 可触发 |
+| 复制产物 | 剪贴板得到 `https://mp.weixin.qq.com/s/MDVUlmL76lg0UsPl8KF86A` —— **短链 `/s/<token>` 形态**,两次提取逐字节一致(token 即文章身份、永久有效,公网 og:title 与所开文章一致);canonical 已扩展为接受短链(dedup key = 短链) |
+| 污染证据 | 沃什文页面树 3647 节点、**475 个** `mp.weixin.qq.com/s?__biz=…` 内嵌 URL(推荐阅读/目录类内链,均带 `scene=21#wechat_redirect`);最短者为另一篇文章 → 树内「最短者」启发式必错 |
+| 标题 aid 位置 | `activity-name`(文章标题)在树**尾部**(node≈3644/3647),`js_name`(公众号名)node≈3635,`js_content` 反而在 node≈74 → 扫标题必须给足节点预算,且**优先 activity-name**(js_name 是账号名,当标题用会全判不符) |
+| 耗时 | 菜单兜底 ≈6~10s/篇(Click 1s + 找菜单项 ≤3s + Invoke 后等剪贴板 2s + 恢复剪贴板) |
+
+## 结论(修复轮落地策略)
+
+树扫描**仅在「唯一候选且该 URL 控件 Name ≈ 页面标题」时采信**(尖峰C:文章自身
+URL 的控件 Name 就是文章标题);候选为 0、≥2、或归属存疑时走「复制链接」菜单;
+标题校验不过(-2)不复制直接弃。菜单依赖解锁桌面(合成 Click),锁屏轮次多候选
+文章留 pending 下轮补全。剪贴板先存后还在 `finally` 恢复;菜单不可达时按
+`(None, 0)` pending,不猜链。
