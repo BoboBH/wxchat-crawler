@@ -341,6 +341,17 @@ def scroll_to_top(host, wheels: int = 30, wait: float = 2.0):
 
 # ---------------------------------------------------------------- 搜索导航
 
+def control_value(ctrl) -> str:
+    """读控件 ValuePattern.Value(搜索框回显校验用);不可读返回 ''。"""
+    try:
+        vp = ctrl.GetPattern(uia.PatternId.ValuePattern)
+        if vp is not None:
+            return (vp.Value or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
 def search_open_profile(account: str, nav_timeout: float = 45.0):
     """从搜索页搜索账号并打开其主页,返回 (ok, message)。
 
@@ -369,10 +380,19 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
         edit.Click(simulateMove=False)
         time.sleep(0.6)
         uia.SetClipboardText(account)
-        uia.SendKeys("{Ctrl}a")
-        time.sleep(0.2)
-        uia.SendKeys("{Ctrl}v")
-        time.sleep(1.0)
+        pasted = False
+        for _ in range(3):  # 前台被用户抢占时合成粘贴会落空:读回校验,失败重聚焦重贴
+            uia.SendKeys("{Ctrl}a")
+            time.sleep(0.2)
+            uia.SendKeys("{Ctrl}v")
+            time.sleep(1.0)
+            if control_value(edit) == account:
+                pasted = True
+                break
+            edit.Click(simulateMove=False)
+            time.sleep(0.6)
+        if not pasted:
+            return False, "搜索框粘贴未生效(前台被占用或桌面锁定),本轮跳过"
         btn = None
         for c in walk_ctrls(host, max_nodes=3000):
             try:
