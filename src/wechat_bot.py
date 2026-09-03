@@ -643,11 +643,16 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
     (尖峰C:class js_article_card…)。
 
     URL 取用策略(尖峰D 实测后):
-      * 树内恰 1 个 mp URL → 直接用(中金点睛 13 篇全为此形态,主路径不变);
-      * 树内 0 个或 ≥2 个(嵌入链接污染)→ 用「··· → 复制链接」菜单兜底
-        (复制的是页面自身 URL,见 copy_link_via_menu);菜单也拿不到时
+      * 树内恰 1 个 mp URL **且归属有据** → 直接用(中金点睛 13 篇全为此形态,
+        主路径不变)。归属证据 = URL 控件 Name ≈ 页面标题(尖峰C:文章自身
+        URL 的控件 Name 就是文章标题;标题只证明「页面身份」,不证明
+        「URL 归属」—— 页面恰嵌 1 个他人链接时计数信任同样会被骗);
+      * 树内 0 个、≥2 个、或唯一候选归属存疑 → 用「··· → 复制链接」菜单
+        兜底(复制的是页面自身 URL,见 copy_link_via_menu);菜单也拿不到时
         返回 (None, 0) 留待下轮,**不再**用「最短者」猜 —— 验收实测最短者
         是别人的文章(本篇 475 个内链里最短者为主文外的一篇)。
+      * 所有成功路径都必须先关文章 tab 再返回(泄漏的 tab 会拖慢下一篇的
+        残留防护,收尾时还会让 close_profile_tab 拒关主页 tab)。
     """
     # 残留文章页防护:上一篇文章 tab 未关成功时,提取会拿到上一篇文章的 URL。
     if find_article_host(timeout=0.5)[1] is not None:
@@ -695,9 +700,19 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
         if not close_active_tab(wait=close_wait):
             close_article_tabs(max_close=2, wait=close_wait)
         return None, -2
-    if len(urls) == 1:
-        return next(iter(urls)), 1
-    # 0 个或 ≥2 个候选:菜单兜底(copy 的就是本页 URL,不受内嵌链接污染)。
+    # 唯一候选也要归属证据:控件 Name ≈ 页面标题(无页面标题时用期望标题,
+    # 两者皆无 → 不采信)。scan_article_page 存的 Name 截到 40 字,截断保留
+    # 前缀,双向包含判断不受影响。
+    owner_probe = page_t or (expected_title or "")
+    if len(urls) == 1 and not (owner_probe and
+                               _titles_match(owner_probe, next(iter(urls.values())))):
+        urls = {}  # 唯一候选归属存疑 → 按 0 个可信 URL 处理,走菜单兜底
+    if urls:
+        if not close_active_tab(wait=close_wait):
+            close_article_tabs(max_close=2, wait=close_wait)
+        return next(iter(urls)), len(urls)
+    # 0 个可信候选:「··· → 复制链接」菜单兜底(copy 的就是本页 URL,
+    # 不受内嵌链接污染)。-2 分支已提前返回,不会走到这里。
     menu_url = copy_link_via_menu(close_wait=close_wait, win=win) if title_ok else None
     if not close_active_tab(wait=close_wait):
         close_article_tabs(max_close=2, wait=close_wait)
@@ -782,8 +797,9 @@ def copy_link_via_menu(close_wait: float = 2.5, win=None) -> str | None:
             return None
         item = None
         t0 = time.time()
+        # 只在本窗口找菜单项:别的窗口残留同名菜单/正文文字绝不能 Invoke
         while time.time() - t0 < 3.0:
-            for t in appex_windows(retries=1):
+            for t in targets:
                 for c in walk_ctrls(t, max_nodes=8000):
                     try:
                         if (c.ClassName or "") == MENU_ITEM_CLASS and \

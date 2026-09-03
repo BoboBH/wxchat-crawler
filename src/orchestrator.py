@@ -128,7 +128,7 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
             max_date = iso
         if fb in seen:
             continue  # 已入库且 URL ok,不重复打开文章页
-        raw, _n = bot.open_article_and_get_url(
+        raw, nodes = bot.open_article_and_get_url(
             t_ctrl, open_timeout=cfg.article_open_timeout_sec,
             scan_timeout=cfg.url_scan_timeout_sec,
             max_nodes=cfg.max_tree_nodes, close_wait=cfg.close_tab_wait_sec,
@@ -142,8 +142,13 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
         elif result == "upgraded":
             upgraded += 1
         seen.add(fb)
+        # 哨兵分型:nodes 为 open_article_and_get_url 的 url数(-2 标题不符 /
+        # -1 未打开 / 0 已打开没取到),pending 原因写进日志方便巡检
+        url_state = "ok" if canon else (
+            "标题不符PENDING" if nodes == -2 else
+            ("未打开PENDING" if nodes == -1 else "PENDING"))
         log.info("[%s] + %s (%s) url=%s", name, title[:40],
-                 date_text or "?", "ok" if canon else "PENDING")
+                 date_text or "?", url_state)
         processed += 1
 
     if max_date:
@@ -182,6 +187,10 @@ def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
                 log.exception("账号 %s 处理异常", name)
                 st = {"ok": False, "new": 0, "upgraded": 0, "pending": 0,
                       "message": "异常(见日志)"}
+                try:  # 异常轮也要尽力收掉半开的主页 tab,防 tab 堆积
+                    bot.close_profile_tab(name, wait=cfg.close_tab_wait_sec)
+                except Exception:
+                    pass
             ok_n += 1 if st["ok"] else 0
             fail_n += 0 if st["ok"] else 1
             new_n += st["new"]
