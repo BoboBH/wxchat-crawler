@@ -7,7 +7,9 @@
   * 树不 realization 时 ShowWindow(SW_MINIMIZE)→SW_RESTORE kick 一次即恢复;
   * 搜索输入必须剪贴板粘贴(SetValue 不触发页面事件),依赖桌面已解锁;
   * 文章 URL 只在文章页的 ValuePattern.Value 出现,列表页永远拿不到;
-  * 激活 tab 的「关闭」按钮 rect 完整落在 Tab rect 内(非激活 tab 是错位悬停位)。
+  * 激活 tab 的「关闭」按钮 rect 完整落在 Tab rect 内(非激活 tab 是错位悬停位);
+  * 文章页可内嵌大量**别人的** mp URL(2026-09-03 实测一篇 475 个),
+    树内多候选时不得「最短者」猜链,须有页面自身 URL 的兜底路线。
 
 微信大版本更新后:用 tools/spike_uia.py --browser --web-only 重新校准以下常量。
 """
@@ -33,7 +35,10 @@ RESULT_ACCOUNT_MARK = "公众号"             # 公众号卡片 Name 含此标�
 CLOSE_BUTTON_NAME = "关闭"                 # tab 关闭按钮(ImageButton)
 CLASS_TAB = "Tab"                         # tab 条上的单个 tab
 ARTICLE_MARKERS = ("activity-name", "js_content", "js_name")  # 文章页 aid 锚点
+TITLE_AIDS = ("activity-name", "js_name")  # 文章页自身标题控件 aid(校验用)
 URL_RE = re.compile(r"https?://mp\.weixin\.qq\.com/s\?\S+")
+# 空白 + 常见零宽不可见字符(微信标题里偶见),标题比对前全部剔除
+INVISIBLE_RE = re.compile("[\\s\\u200b\\u200c\\u200d\\u2060\\ufeff]+")
 
 USER32 = ctypes.windll.user32
 
@@ -524,16 +529,43 @@ def close_profile_tab(account: str, wait: float = 2.5, max_try: int = 3) -> bool
     return find_profile_host(account=account, kicks=0)[1] is None
 
 
-def extract_article_urls(host, max_nodes: int = 5000):
-    """文章宿主全树扫 ValuePattern.Value,返回 ({url: 控件名}, 遍历节点数)。
+def scan_article_page(host, max_nodes: int = 12000, max_depth: int = 40):
+    """文章页单趟扫描:同时收集「自身标题」与树内 mp URL。
 
-    尖峰C:833~1218 节点 / 1.8~2.2s;每篇实测恰 1 个 mp 文章 URL
-    (偶有页内小程序链接,取最短者即文章自身,见 open_article_and_get_url)。
+    返回 (title, {url: 控件名}, 遍历节点数)。标题取 aid ∈ TITLE_AIDS 控件的
+    非空 Name,activity-name(文章 <h1>)优先于 js_name —— js_name 是
+    **公众号名**而非标题,且遍历序里常先出现(实测 node 3635 vs 3644),
+    拿它当标题会把每篇都判成「标题不符」;URL 为 ValuePattern 命中 URL_RE 者。
+
+    两个实测事实决定了本函数的形态(2026-09-03 实测,郭磊宏观茶座
+    「沃什Jackson Hole演讲」一篇):
+      * 标题 aid 落在 a11y 树**尾部**(node≈3635/3647,而 js_content 在
+        node≈74)—— 按正文锚点的节点预算(1200)扫标题必然落空;
+      * 页内嵌入链接可把树撑得很大并带来大量**别人的** mp URL(该篇
+        475 个,推荐阅读/目录类内链),「最短者即主文」不再成立。
+    因此标题与 URL 必须一趟拿齐且预算给足(max_depth 40:标题 aid 实测
+    深度仅 7~9,但嵌入链接子树更深,34 会截断)。
     """
+    title = ""
+    account_name = ""
     urls = {}
     n = 0
-    for c in walk_ctrls(host, max_nodes=max_nodes, max_depth=34):
+    for c in walk_ctrls(host, max_nodes=max_nodes, max_depth=max_depth):
         n += 1
+        try:
+            aid = c.AutomationId or ""
+        except Exception:
+            aid = ""
+        if (not title or not account_name) and aid in TITLE_AIDS:
+            try:
+                t = (c.Name or "").strip()
+            except Exception:
+                t = ""
+            if t:
+                if aid == "activity-name":
+                    title = t
+                elif not account_name:
+                    account_name = t
         try:
             vp = c.GetPattern(uia.PatternId.ValuePattern)
             if vp is None:
@@ -546,18 +578,61 @@ def extract_article_urls(host, max_nodes: int = 5000):
         m = URL_RE.match(str(v))
         if m:
             urls.setdefault(m.group(0), (c.Name or "")[:40])
+    # 页面缺 activity-name 时退回 js_name(校验多半仍会 False → -2,宁缺毋错)
+    return title or account_name, urls, n
+
+
+def extract_article_urls(host, max_nodes: int = 5000):
+    """文章宿主树扫 ValuePattern.Value,返回 ({url: 控件名}, 遍历节点数)。
+
+    兼容包装(见 scan_article_page)。注意:多 URL 页面的树内集合**可能
+    全是页内嵌入链接**,不含页面自身 URL —— 取舍逻辑在
+    open_article_and_get_url(单 URL 才直接用,多 URL 走「复制链接」兜底)。
+    """
+    _t, urls, n = scan_article_page(host, max_nodes=max_nodes)
     return urls, n
+
+
+def read_page_title(host, max_nodes: int = 12000) -> str:
+    """读文章页「自身」标题;读不到返回 ''(调用方视为无法校验)。"""
+    return scan_article_page(host, max_nodes=max_nodes)[0]
+
+
+def _titles_match(expected: str | None, actual: str | None) -> bool:
+    """标题校验:剔除全部空白/零宽字符后,任一方向包含即算同一篇。
+
+    expected 来自主页列表卡片,actual 是文章页自身标题;两者都可能带排版
+    空白或前后缀差异,故用双向包含而非全等。任一侧为空(含 actual 为空 =
+    无法校验)返回 False。
+    """
+    if not expected or not actual:
+        return False
+    e = INVISIBLE_RE.sub("", str(expected))
+    a = INVISIBLE_RE.sub("", str(actual))
+    if not e or not a:
+        return False
+    return e in a or a in e
 
 
 def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
                              scan_timeout: float = 20.0, max_nodes: int = 5000,
-                             close_wait: float = 2.5):
+                             close_wait: float = 2.5,
+                             expected_title: str | None = None):
     """打开标题所在文章,提取其 raw URL,关闭文章 tab。返回 (raw_url|None, url数)。
 
     url数 哨兵:-1 = 文章页未打开/无可 Invoke 卡片/残留文章页未清干净
-    (此时本篇有意不打开);0 = 已打开但未提取到 URL。
+    (此时本篇有意不打开);0 = 已打开但未提取到 URL;
+    -2 = 标题校验未通过(打开的页不是 expected_title 对应的文章;此时本页
+    URL 一律不上报 —— 既防残留页错配,也防把内嵌链接记到本篇头上)。
+    expected_title 为 None 时不出现 -2。
     标题 TextControl 自身无 InvokePattern,向上最多 5 级找可 Invoke 的祖先卡片
     (尖峰C:class js_article_card…)。
+
+    URL 取用策略(2026-09-03 实测后):
+      * 树内恰 1 个 mp URL → 直接用(中金点睛 13 篇全为此形态,主路径不变);
+      * 树内 0 个或 ≥2 个(嵌入链接污染)→ 本版直接 pending(返回 (None, 0)),
+        **不再**用「最短者」猜 —— 验收实测最短者是别人的文章(一篇 475 个
+        内链里最短者为主文外的一篇);「··· → 复制链接」菜单兜底随后加入。
     """
     # 残留文章页防护:上一篇文章 tab 未关成功时,提取会拿到上一篇文章的 URL。
     if find_article_host(timeout=0.5)[1] is not None:
@@ -589,19 +664,28 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
     if h is None:
         close_article_tabs(max_close=2, wait=close_wait)
         return None, -1
+    # 标题与 URL 一趟扫描拿齐(标题 aid 在树尾部,见 scan_article_page);
+    # expected_title 给定时标题是硬校验,读不到就多扫几轮再下结论。
     deadline = time.time() + scan_timeout
-    urls = {}
-    while time.time() < deadline:
-        urls, _n = extract_article_urls(h, max_nodes=max_nodes)
-        if urls:
+    page_t, urls = "", {}
+    while True:
+        page_t, urls, _n = scan_article_page(h, max_nodes=max(max_nodes, 12000))
+        if urls and (page_t or expected_title is None):
+            break
+        if time.time() >= deadline:
             break
         time.sleep(1.0)
+    title_ok = bool(expected_title) and _titles_match(expected_title, page_t)
+    if expected_title is not None and not title_ok:
+        if not close_active_tab(wait=close_wait):
+            close_article_tabs(max_close=2, wait=close_wait)
+        return None, -2
+    if len(urls) == 1:
+        return next(iter(urls)), 1
+    # 0 个或 ≥2 个候选:宁 pending 也不猜(见 docstring 策略)。
     if not close_active_tab(wait=close_wait):
         close_article_tabs(max_close=2, wait=close_wait)
-    if not urls:
-        return None, 0
-    # 每篇通常恰 1 个;偶含页内小程序链接时,最短者为主文 URL(尖峰C 经验)
-    return sorted(urls, key=len)[0], len(urls)
+    return None, 0
 
 
 if __name__ == "__main__":

@@ -131,7 +131,8 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
         raw, _n = bot.open_article_and_get_url(
             t_ctrl, open_timeout=cfg.article_open_timeout_sec,
             scan_timeout=cfg.url_scan_timeout_sec,
-            max_nodes=cfg.max_tree_nodes, close_wait=cfg.close_tab_wait_sec)
+            max_nodes=cfg.max_tree_nodes, close_wait=cfg.close_tab_wait_sec,
+            expected_title=title)
         canon = canonical.canonicalize_url(raw)
         result = store.upsert_article(acc_id, fb, canon, title, date_text, iso)
         if result == "new":
