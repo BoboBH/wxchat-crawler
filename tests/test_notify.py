@@ -174,6 +174,7 @@ crawl:
   stop_streak: 3
   overlap_days: 2
   new_account_screens: 2
+  deep_scroll_screens: 40
   scroll_wait_sec: 2.0
   account_gap_min_sec: 20
   account_gap_max_sec: 60
@@ -263,7 +264,8 @@ def _cfg(tmp_path, notify: NotifyConfig) -> CrawlConfig:
     return CrawlConfig(
         process_name="WeChat.exe", exe_path="C:/x/WeChat.exe",
         expected_version_prefix="3.9", stop_streak=3, overlap_days=3,
-        new_account_screens=2, scroll_wait_sec=0.0, account_gap_min_sec=0,
+        new_account_screens=2, deep_scroll_screens=40,
+        scroll_wait_sec=0.0, account_gap_min_sec=0,
         account_gap_max_sec=0, article_open_timeout_sec=1.0,
         url_scan_timeout_sec=1.0, max_tree_nodes=500, close_tab_wait_sec=0.0,
         kick_retry=1, db_path=tmp_path / "db.sqlite", log_dir=tmp_path / "logs",
@@ -280,6 +282,8 @@ def _stub_round(monkeypatch, url_result):
     monkeypatch.setattr(bot, "find_profile_host",
                         lambda account=None, kicks=0: (100, object()))
     monkeypatch.setattr(bot, "close_article_tabs", lambda **kw: True)
+    monkeypatch.setattr(bot, "scroll_once", lambda host, wheels=10: None)
+    monkeypatch.setattr(bot, "scroll_to_top", lambda host, wheels=30, wait=0: None)
     monkeypatch.setattr(bot, "scan_list", lambda host, max_nodes=0:
                         ([_FakeCtrl("构建中国特色新闻学", 100.0)], [("昨天", 0.0)]))
     monkeypatch.setattr(bot, "close_profile_tab", lambda name, wait=0: True)

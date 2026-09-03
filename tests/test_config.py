@@ -14,6 +14,7 @@ crawl:
   stop_streak: 3
   overlap_days: 2
   new_account_screens: 2
+  deep_scroll_screens: 40
   scroll_wait_sec: 2.0
   account_gap_min_sec: 20
   account_gap_max_sec: 60
@@ -43,6 +44,7 @@ def test_load_ok(tmp_path):
     cfg = load_config(sp, ap)
     assert cfg.process_name == "Weixin.exe"
     assert cfg.stop_streak == 3
+    assert cfg.deep_scroll_screens == 40
     assert cfg.account_gap_min_sec == 20
     assert cfg.article_open_timeout_sec == 40
     assert isinstance(cfg.scroll_wait_sec, float)
@@ -90,6 +92,14 @@ def test_missing_field(tmp_path):
 def test_bad_streak(tmp_path):
     sp, ap = _write(tmp_path, settings=SETTINGS.replace("stop_streak: 3", "stop_streak: 0"))
     with pytest.raises(ConfigError, match="stop_streak"):
+        load_config(sp, ap)
+
+
+def test_bad_deep_scroll(tmp_path):
+    sp, ap = _write(tmp_path,
+                    settings=SETTINGS.replace("deep_scroll_screens: 40",
+                                              "deep_scroll_screens: -1"))
+    with pytest.raises(ConfigError, match="deep_scroll_screens"):
         load_config(sp, ap)
 
 

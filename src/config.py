@@ -23,6 +23,7 @@ class CrawlConfig:
     stop_streak: int
     overlap_days: int
     new_account_screens: int
+    deep_scroll_screens: int
     scroll_wait_sec: float
     account_gap_min_sec: int
     account_gap_max_sec: int
@@ -119,6 +120,7 @@ def load_config(settings_path=DEFAULT_SETTINGS,
         stop_streak=int(_require(crawl, "stop_streak", "settings.crawl")),
         overlap_days=int(_require(crawl, "overlap_days", "settings.crawl")),
         new_account_screens=int(_require(crawl, "new_account_screens", "settings.crawl")),
+        deep_scroll_screens=int(_require(crawl, "deep_scroll_screens", "settings.crawl")),
         scroll_wait_sec=float(_require(crawl, "scroll_wait_sec", "settings.crawl")),
         account_gap_min_sec=int(_require(crawl, "account_gap_min_sec", "settings.crawl")),
         account_gap_max_sec=int(_require(crawl, "account_gap_max_sec", "settings.crawl")),
@@ -135,6 +137,8 @@ def load_config(settings_path=DEFAULT_SETTINGS,
         raise ConfigError("crawl.stop_streak 必须 >= 1")
     if cfg.overlap_days < 0:
         raise ConfigError("crawl.overlap_days 不能为负")
+    if cfg.deep_scroll_screens < 0:
+        raise ConfigError("crawl.deep_scroll_screens 不能为负")
     if cfg.account_gap_min_sec > cfg.account_gap_max_sec:
         raise ConfigError("crawl.account_gap_min_sec 不能大于 account_gap_max_sec")
     cfg.notify = _parse_notify(s.get("notify"))

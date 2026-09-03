@@ -80,8 +80,33 @@ def run_check(cfg: CrawlConfig) -> int:
     return 0 if ok else 1
 
 
+def _pairs_and_dates(titles, times):
+    """扫描结果 → (pairs, 归一化日期列表)。"""
+    names = [(c.Name or "").strip() for c in titles]
+    tops = [c.BoundingRectangle.top for c in titles]
+    pairs = pair_publish_dates(list(zip(names, tops)), times)
+    dates = [normalize_date_text(d) for _n, d in pairs]
+    return pairs, dates
+
+
+def _covers_cutoff(dates: list[str | None], cutoff: str) -> bool:
+    """可见列表是否已扫过截止日窗口:最旧可解析日期 ≤ cutoff 即覆盖。
+
+    全部无法解析 → 视为未覆盖(继续滚,由屏数上限/触底兜底)。
+    滚动中途的日期标签受 sticky 头钳制可能错位,但可视集合仍近似真实
+    底部区域,仅用于「要不要继续滚」的深度判断,不作入库依据。
+    """
+    real = [d for d in dates if d]
+    return bool(real) and min(real) <= cutoff
+
+
 def _collect_list(cfg: CrawlConfig, host, cutoff: str | None):
-    """读列表;新账号(无水位线)滚动扩量。返回 (title_ctrls, pairs, dates)。
+    """读列表并按需滚动扩量,返回 (title_ctrls, pairs, dates)。
+
+    新账号(无水位线):固定滚 new_account_screens 屏(原逻辑)。
+    老账号(有截止日):回填模式 —— 最旧可见日期尚未早于截止日就继续下滚
+    (至多 deep_scroll_screens 屏,0=关闭),把 overlap 窗口真正扫全;
+    首屏已覆盖则一屏不滚(日常增量零额外开销),触底(条数不增)提前停。
 
     扩量滚动后必须回页顶重扫:日期标签是 sticky 头,滚动状态下 rect 被视口
     钳制,扫描得到的日期会与标题错位(验收实测),回顶后才是自然排布。
@@ -97,10 +122,22 @@ def _collect_list(cfg: CrawlConfig, host, cutoff: str | None):
             titles, times = t2, s2
         bot.scroll_to_top(host, wait=cfg.scroll_wait_sec)
         titles, times = bot.scan_list(host, max_nodes=cfg.max_tree_nodes)
-    names = [(c.Name or "").strip() for c in titles]
-    tops = [c.BoundingRectangle.top for c in titles]
-    pairs = pair_publish_dates(list(zip(names, tops)), times)
-    dates = [normalize_date_text(d) for _n, d in pairs]
+    elif cfg.deep_scroll_screens > 0:
+        scrolled = False
+        for _ in range(cfg.deep_scroll_screens):
+            if _covers_cutoff(_pairs_and_dates(titles, times)[1], cutoff):
+                break
+            bot.scroll_once(host)
+            time.sleep(cfg.scroll_wait_sec)
+            t2, s2 = bot.scan_list(host, max_nodes=cfg.max_tree_nodes)
+            if len(t2) == len(titles):
+                break  # 触底,没有更多可加载
+            titles, times = t2, s2
+            scrolled = True
+        if scrolled:
+            bot.scroll_to_top(host, wait=cfg.scroll_wait_sec)
+            titles, times = bot.scan_list(host, max_nodes=cfg.max_tree_nodes)
+    pairs, dates = _pairs_and_dates(titles, times)
     return titles, pairs, dates
 
 
