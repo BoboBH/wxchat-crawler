@@ -321,6 +321,24 @@ def scroll_once(host, wheels: int = 10):
         pass
 
 
+def scroll_to_top(host, wheels: int = 30, wait: float = 2.0):
+    """滚轮回到页顶并稍候(合成鼠标输入,锁屏下无效)。
+
+    主页日期标签是 sticky 头:页面滚动后其 rect 被视口钳制、不再随分组走,
+    在滚动状态下扫描会导致日期与标题错位配对(验收实测:同文一次 08-28
+    一次 08-30)。扩量滚动后必须回顶再取最终列表。
+    """
+    try:
+        r = host.BoundingRectangle
+        USER32.SetCursorPos(
+            int((r.left + r.right) // 2), int(min((r.top + r.bottom) // 2, r.bottom - 60)))
+        time.sleep(0.3)
+        uia.WheelUp(wheels)
+        time.sleep(wait)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------- 搜索导航
 
 def search_open_profile(account: str, nav_timeout: float = 45.0):

@@ -51,7 +51,11 @@ def run_check(cfg: CrawlConfig) -> int:
 
 
 def _collect_list(cfg: CrawlConfig, host, cutoff: str | None):
-    """读列表;新账号(无水位线)滚动扩量。返回 (title_ctrls, pairs, dates)。"""
+    """读列表;新账号(无水位线)滚动扩量。返回 (title_ctrls, pairs, dates)。
+
+    扩量滚动后必须回页顶重扫:日期标签是 sticky 头,滚动状态下 rect 被视口
+    钳制,扫描得到的日期会与标题错位(验收实测),回顶后才是自然排布。
+    """
     titles, times = bot.scan_list(host, max_nodes=cfg.max_tree_nodes)
     if cutoff is None:
         for _ in range(cfg.new_account_screens):
@@ -61,6 +65,8 @@ def _collect_list(cfg: CrawlConfig, host, cutoff: str | None):
             if len(t2) == len(titles):
                 break
             titles, times = t2, s2
+        bot.scroll_to_top(host, wait=cfg.scroll_wait_sec)
+        titles, times = bot.scan_list(host, max_nodes=cfg.max_tree_nodes)
     names = [(c.Name or "").strip() for c in titles]
     tops = [c.BoundingRectangle.top for c in titles]
     pairs = pair_publish_dates(list(zip(names, tops)), times)
