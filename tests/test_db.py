@@ -33,23 +33,42 @@ def test_upsert_new_exists_upgrade(store):
     assert rows[0]["url_status"] == "ok"
 
 
-def test_upgrade_collision_returns_exists(store):
+def test_upgrade_collision_upgrades_in_place(store):
+    """升级撞 canonical(被他行持有)→ 原地升 URL/状态,保留原 dedup_key。"""
     acc = store.get_or_create_account("中金点睛")
     canon = "https://mp.weixin.qq.com/s?__biz=x&mid=1&idx=1&sn=s&chksm=c"
     assert store.upsert_article(acc, "t|f1", None, "A", None, None) == "new"
     # 另一行先持有该 canonical
     assert store.upsert_article(acc, "t|f2", canon, "B", None, None) == "new"
-    # 升级 pending 行时 dedup_key 碰撞 → exists(不抛异常),且该行仍为 pending
-    assert store.upsert_article(acc, "t|f1", canon, "A", None, None) == "exists"
-    assert store.conn.execute(
-        "SELECT url_status FROM articles WHERE fallback_key='t|f1'").fetchone()["url_status"] == "pending"
+    # 升级 pending 行时 dedup_key 碰撞 → 原地升级(pending → ok),不抛异常
+    assert store.upsert_article(acc, "t|f1", canon, "A", None, None) == "upgraded"
+    row = store.conn.execute(
+        "SELECT dedup_key, url, url_status FROM articles WHERE fallback_key='t|f1'").fetchone()
+    assert row["url_status"] == "ok"
+    assert row["url"] == canon
+    assert row["dedup_key"] == "t|f1"  # canonical 被占,保留本行原 dedup_key
 
 
-def test_insert_collision_returns_exists(store):
+def test_insert_collision_other_article_gets_own_row(store):
+    """同账号两篇撞同一 canonical(异常数据):后到者仍落自己的终态行。"""
     acc = store.get_or_create_account("中金点睛")
     canon = "https://mp.weixin.qq.com/s?__biz=x&mid=1&idx=1&sn=s&chksm=c"
     assert store.upsert_article(acc, "t|a", canon, "A", None, None) == "new"
-    assert store.upsert_article(acc, "t|b", canon, "B", None, None) == "exists"
+    assert store.upsert_article(acc, "t|b", canon, "B", None, None) == "new"
+    rows = store.conn.execute(
+        "SELECT dedup_key, url, url_status FROM articles ORDER BY id").fetchall()
+    assert len(rows) == 2
+    assert rows[0]["dedup_key"] == canon
+    assert rows[1]["dedup_key"] == "t|b"  # 退化为 fallback 键,canonical 不被覆盖
+    assert rows[1]["url"] == canon and rows[1]["url_status"] == "ok"
+
+
+def test_insert_genuine_duplicate_returns_exists(store):
+    """同账号同 fallback_key(真重复)→ exists,不重复插行。"""
+    acc = store.get_or_create_account("中金点睛")
+    canon = "https://mp.weixin.qq.com/s?__biz=x&mid=1&idx=1&sn=s&chksm=c"
+    assert store.upsert_article(acc, "t|a", canon, "A", None, None) == "new"
+    assert store.upsert_article(acc, "t|a", canon, "A", None, None) == "exists"
     assert len(store.conn.execute("SELECT 1 FROM articles").fetchall()) == 1
 
 
@@ -92,8 +111,54 @@ def test_canonical_collision_with_ok_row_returns_exists(store):
     acc = store.get_or_create_account("中金点睛")
     canon = "https://mp.weixin.qq.com/s?__biz=1&sn=a"
     assert store.upsert_article(acc, "t|f1", canon, "A", None, None) == "new"
-    assert store.upsert_article(acc, "t|f2", canon, "B", None, None) == "exists"
-    assert len(store.conn.execute("SELECT 1 FROM articles").fetchall()) == 1
+    assert store.upsert_article(acc, "t|f2", canon, "B", None, None) == "new"
+    assert len(store.conn.execute("SELECT 1 FROM articles").fetchall()) == 2
+
+
+def test_cross_account_same_canonical_both_stored(store):
+    """转载场景:两账号同一 canonical → 各得一条终态行,后到者返回 'new'。"""
+    acc_a = store.get_or_create_account("中金点睛")
+    acc_b = store.get_or_create_account("郭磊宏观茶座")
+    canon = "https://mp.weixin.qq.com/s?__biz=1&mid=2&idx=1&sn=shared"
+    assert store.upsert_article(acc_a, "t|a1", canon, "同文", None, None) == "new"
+    assert store.upsert_article(acc_b, "t|b1", canon, "同文", None, None) == "new"
+    for acc, fb in ((acc_a, "t|a1"), (acc_b, "t|b1")):
+        rows = store.conn.execute(
+            "SELECT url, url_status, fallback_key FROM articles WHERE account_id=?",
+            (acc,)).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["url"] == canon
+        assert rows[0]["url_status"] == "ok"
+        assert rows[0]["fallback_key"] == fb
+        assert fb in store.seen_fallbacks(acc, status="ok")
+
+
+def test_cross_account_rerun_is_exists(store):
+    """账号 B 二轮再遇同文:fb 已入库(状态 ok)→ 'exists',不再重开文章页。"""
+    acc_b = store.get_or_create_account("郭磊宏观茶座")
+    canon = "https://mp.weixin.qq.com/s?__biz=1&mid=2&idx=1&sn=shared"
+    assert store.upsert_article(acc_b, "t|b1", canon, "同文", None, None) == "new"
+    assert "t|b1" in store.seen_fallbacks(acc_b, status="ok")  # 编排层据此跳过
+    assert store.upsert_article(acc_b, "t|b1", canon, "同文", None, None) == "exists"
+    assert len(store.conn.execute(
+        "SELECT 1 FROM articles WHERE account_id=?", (acc_b,)).fetchall()) == 1
+
+
+def test_cross_account_upgrade_path_collision(store):
+    """B 先有 pending 行,补 URL 时 canonical 被 A 持有 → 原地升级为 ok 行。"""
+    acc_a = store.get_or_create_account("中金点睛")
+    acc_b = store.get_or_create_account("郭磊宏观茶座")
+    canon = "https://mp.weixin.qq.com/s?__biz=1&mid=2&idx=1&sn=shared"
+    assert store.upsert_article(acc_a, "t|a1", canon, "同文", None, None) == "new"
+    assert store.upsert_article(acc_b, "t|b1", None, "同文", None, None) == "new"
+    assert store.upsert_article(acc_b, "t|b1", canon, "同文", None, None) == "upgraded"
+    row = store.conn.execute(
+        "SELECT dedup_key, url, url_status FROM articles WHERE account_id=?",
+        (acc_b,)).fetchone()
+    assert row["url_status"] == "ok"
+    assert row["url"] == canon
+    assert row["dedup_key"] == "t|b1"  # canonical 被 A 持有,B 行保留 fallback 键
+    assert "t|b1" in store.seen_fallbacks(acc_b, status="ok")
 
 
 def test_seen_fallbacks_status_filter(store):
