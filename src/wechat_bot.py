@@ -52,9 +52,15 @@ K32 = ctypes.windll.kernel32
 USER32.OpenClipboard.argtypes = [ctypes.c_void_p]
 USER32.GetClipboardData.argtypes = [ctypes.c_uint]
 USER32.GetClipboardData.restype = ctypes.c_void_p
+USER32.GetForegroundWindow.restype = ctypes.c_void_p  # 前台句柄比较必须完整 64 位
+USER32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
 K32.GlobalLock.argtypes = [ctypes.c_void_p]
 K32.GlobalLock.restype = ctypes.c_void_p
 K32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+# 搜索页引导(主窗热键):4.1.12.55 实证 {Ctrl}f 有效,{Ctrl}k 为备选
+BOOTSTRAP_HOTKEYS = ("{Ctrl}f", "{Ctrl}k")
+MAIN_WINDOW_PROCESS = "weixin.exe"               # 微信主进程映像名
+LOCK_PROCESSES = ("lockapp.exe", "logonui.exe")  # 锁屏/登录界面 → 合成键鼠不可达
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -457,6 +463,151 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
                 kicked += 1
             time.sleep(1.0)
         return False, "主页未就绪(未找到 article__item__title)"
+    finally:
+        try:
+            uia.SetClipboardText(clip)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------- 搜索页引导(自愈)
+
+def desktop_state() -> str:
+    """'locked' | 'no-foreground' | 'ok':合成键鼠只在前台正常时有效。"""
+    try:
+        fg = USER32.GetForegroundWindow()
+        if not fg:
+            return "no-foreground"
+        pid = ctypes.c_uint()
+        USER32.GetWindowThreadProcessId(ctypes.c_void_p(fg), ctypes.byref(pid))
+        return "locked" if process_name(pid.value).lower() in LOCK_PROCESSES else "ok"
+    except Exception:
+        return "unknown"
+
+
+def _force_foreground(hwnd: int) -> bool:
+    """SetForegroundWindow 受前台锁限制(后台进程调用常被静默拒绝);
+    被拒时先 AttachThreadInput 借前台线程输入权限,再不行就 tap Alt 解锁重试。"""
+    try:
+        USER32.SetForegroundWindow(ctypes.c_void_p(hwnd))
+        if USER32.GetForegroundWindow() == hwnd:
+            return True
+        fg = USER32.GetForegroundWindow()
+        cur = K32.GetCurrentThreadId()
+        other = USER32.GetWindowThreadProcessId(ctypes.c_void_p(fg), None) if fg else 0
+        attached = False
+        if other and other != cur:
+            attached = bool(
+                USER32.AttachThreadInput(ctypes.c_uint(cur), ctypes.c_uint(other), 1))
+            USER32.BringWindowToTop(ctypes.c_void_p(hwnd))
+            USER32.SetForegroundWindow(ctypes.c_void_p(hwnd))
+            if attached:
+                USER32.AttachThreadInput(ctypes.c_uint(cur), ctypes.c_uint(other), 0)
+        if USER32.GetForegroundWindow() != hwnd:
+            uia.SendKeys("{Alt}")  # 一次无害 Alt tap 解除前台锁
+            USER32.SetForegroundWindow(ctypes.c_void_p(hwnd))
+        return USER32.GetForegroundWindow() == hwnd
+    except Exception:
+        return False
+
+
+def _main_window_candidates() -> list:
+    """微信主进程的顶层窗口(AppEx 的 Chrome_WidgetWin_0 除外)。"""
+    out = []
+    try:
+        for c in uia.GetRootControl().GetChildren():
+            try:
+                if process_name(c.ProcessId).lower() == MAIN_WINDOW_PROCESS and \
+                        (c.ClassName or "") != APP_CLASS:
+                    out.append(c)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def _focus_main() -> tuple[bool, str]:
+    """激活微信主窗口(Weixin.exe 顶层非 AppEx 窗口中面积最大者,
+    类名形如 Qt51514QWindowIcon、Name=微信)。返回 (是否找到主窗口, 说明)。
+    置前失败不中止:合成热键仍值得一试,由调用方把说明并入结果消息。"""
+    cands = _main_window_candidates()
+    if not cands:
+        return False, f"未找到微信主进程({MAIN_WINDOW_PROCESS})的顶层主窗口"
+    try:
+        win = max(cands, key=lambda c: max(
+            (c.BoundingRectangle.right - c.BoundingRectangle.left) *
+            (c.BoundingRectangle.bottom - c.BoundingRectangle.top), 0))
+        USER32.ShowWindow(win.NativeWindowHandle, 9)  # SW_RESTORE
+        time.sleep(0.5)
+        ok = _force_foreground(win.NativeWindowHandle)
+        time.sleep(1.0)
+        return True, "" if ok else "主窗口未能置前(仍尝试热键)"
+    except Exception as exc:
+        return True, f"主窗口聚焦异常({exc})(仍尝试热键)"
+
+
+def _bootstrap_once(account: str, shortcut: str, poll_sec: float) -> tuple[bool, str]:
+    """单次引导:主窗聚焦 → 合成热键聚焦微信搜索 → 粘贴账号名 → Enter →
+    轮询 AppEx 里出现搜索页输入框(即「搜一搜」tab 被重新打开)。"""
+    try:
+        state = desktop_state()
+        if state != "ok":
+            return False, f"桌面状态={state}(锁屏/无前台窗口),合成键鼠不可达"
+        found, focus_msg = _focus_main()
+        if not found:
+            return False, focus_msg
+        uia.SendKeys(shortcut)
+        time.sleep(1.0)
+        uia.SetClipboardText(account)
+        uia.SendKeys("{Ctrl}a")
+        uia.SendKeys("{Ctrl}v")
+        time.sleep(1.0)
+        uia.SendKeys("{Enter}")
+        t0 = time.time()
+        while time.time() - t0 < poll_sec:
+            _w, _h, edit = find_search_entry()
+            if edit is not None:
+                return True, f"搜索页已由 {shortcut} 打开"
+            time.sleep(2.0)
+        tail = f";{focus_msg}" if focus_msg else ""
+        return False, f"{shortcut} 后 {poll_sec:.0f}s 内未出现搜索页输入框{tail}"
+    except Exception as exc:
+        return False, f"引导异常({shortcut}): {exc}"
+
+
+def ensure_search_page(account: str, attempts: int = 2,
+                       poll_sec: float = 30.0) -> tuple[bool, str]:
+    """确保 AppEx 里有搜一搜页:激活微信主窗→Ctrl+F→粘贴账号名→回车。
+    返回 (是否可用, 说明)。失败自动在 {Ctrl}f/{Ctrl}k 与重试间轮换。
+
+    AppEx 搜索页 tab 会被微信在数小时内回收,编排层在
+    search_open_profile 报「未找到搜索页」时调用本函数自愈,不再要求
+    人工部署。规则:绝不抛异常;剪贴板先存后还在 finally 恢复;尝试间
+    静默暂停 3s(避开前台焦点争抢);说明里写清走向(哪个热键成功 /
+    锁屏不可达 / 各尝试为何落空)。"""
+    clip = ""
+    try:
+        clip = uia.GetClipboardText() or ""
+    except Exception:
+        pass
+    msgs: list[str] = []
+    try:
+        _w, _h, edit = find_search_entry()
+        if edit is not None:
+            return True, "搜索页已可用(无需引导)"
+        for i in range(max(1, attempts)):
+            if i:
+                time.sleep(3.0)
+            shortcut = BOOTSTRAP_HOTKEYS[i % len(BOOTSTRAP_HOTKEYS)]
+            ok, why = _bootstrap_once(account, shortcut, poll_sec)
+            msgs.append(why)
+            if ok:
+                return True, why
+        return False, ";".join(msgs) if msgs else "未执行任何引导尝试"
+    except Exception as exc:  # 任何异常都不得打断抓取主流程
+        msgs.append(f"引导异常: {exc}")
+        return False, ";".join(msgs)
     finally:
         try:
             uia.SetClipboardText(clip)
