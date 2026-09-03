@@ -628,6 +628,25 @@ def _titles_match(expected: str | None, actual: str | None) -> bool:
     return e in a or a in e
 
 
+def select_trusted_url(urls: dict, page_title: str | None,
+                       expected_title: str | None) -> str | None:
+    """树内 URL 取用策略(纯函数,单测锚点):唯一候选且归属可验证才采信。
+
+    采信 = 恰好 1 个候选,且「页面标题(读不到时退回期望标题)」与该 URL
+    控件的 Name 双向包含(尖峰C:文章自身 URL 的控件 Name 就是文章标题)。
+    0 个、≥2 个、或归属验证不过、或两个标题都拿不到 → 一律返回 None,
+    调用方走「··· → 复制链接」菜单兜底 —— 树序首个候选在污染页(内嵌 475 个
+    mp URL)上几乎必是别人的文章,绝不能按遍历顺序猜。
+    """
+    if len(urls) != 1:
+        return None
+    url = next(iter(urls))
+    probe = page_title or (expected_title or "")
+    if not (probe and _titles_match(probe, urls[url])):
+        return None
+    return url
+
+
 def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
                              scan_timeout: float = 20.0, max_nodes: int = 5000,
                              close_wait: float = 2.5,
@@ -700,24 +719,23 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
         if not close_active_tab(wait=close_wait):
             close_article_tabs(max_close=2, wait=close_wait)
         return None, -2
-    # 唯一候选也要归属证据:控件 Name ≈ 页面标题(无页面标题时用期望标题,
-    # 两者皆无 → 不采信)。scan_article_page 存的 Name 截到 40 字,截断保留
-    # 前缀,双向包含判断不受影响。
-    owner_probe = page_t or (expected_title or "")
-    if len(urls) == 1 and not (owner_probe and
-                               _titles_match(owner_probe, next(iter(urls.values())))):
-        urls = {}  # 唯一候选归属存疑 → 按 0 个可信 URL 处理,走菜单兜底
-    if urls:
+    # 树内 0 个、≥2 个、或唯一候选归属存疑 → 全部丢弃,走「··· → 复制链接」
+    # 菜单兜底(策略集中在 select_trusted_url,可单测)。≥2 时若按树序取首,
+    # 污染页(内嵌 475 个 mp URL)几乎必取到别人的文章 —— 且入库后是终态
+    # ok 行,永不重试,比最短者启发式更糟。scan_article_page 存的 Name 截到
+    # 40 字,截断保留前缀,双向包含判断不受影响。
+    own = select_trusted_url(urls, page_t, expected_title)
+    if own is not None:  # 此处 urls 只可能是「唯一且归属已验证」的候选
         if not close_active_tab(wait=close_wait):
             close_article_tabs(max_close=2, wait=close_wait)
-        return next(iter(urls)), len(urls)
+        return own, 1
     # 0 个可信候选:「··· → 复制链接」菜单兜底(copy 的就是本页 URL,
     # 不受内嵌链接污染)。-2 分支已提前返回,不会走到这里。
     menu_url = copy_link_via_menu(close_wait=close_wait, win=win) if title_ok else None
     if not close_active_tab(wait=close_wait):
         close_article_tabs(max_close=2, wait=close_wait)
     if menu_url:
-        return menu_url, len(urls) or 1
+        return menu_url, 1  # 菜单拿的是本页自身 URL,按 1 个可信候选上报
     return None, 0
 
 
