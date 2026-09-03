@@ -35,6 +35,18 @@ def test_dedup_key_prefers_url():
     assert make_dedup_key(RAW_URL, "任意标题", "8月23日") == CANON_URL
 
 
+def test_canonicalize_short_link():
+    """尖峰D:「复制链接」菜单只给短链 /s/<token>;token 永久,即身份。"""
+    short = "https://mp.weixin.qq.com/s/MDVUlmL76lg0UsPl8KF86A"
+    assert canonicalize_url(short) == short
+    assert canonicalize_url("http://mp.weixin.qq.com/s/AbC_123") == \
+        "https://mp.weixin.qq.com/s/AbC_123"
+    assert canonicalize_url(short + "#rd") == short
+    assert canonicalize_url("https://mp.weixin.qq.com/s/") is None
+    assert canonicalize_url("https://example.com/s/AbC123") is None
+    assert make_dedup_key(short, "任意标题", "8月23日") == short
+
+
 def test_dedup_key_fallback_deterministic():
     k1 = make_dedup_key(None, "标题A", "8月23日")
     k2 = make_dedup_key(None, "标题A", "8月23日")

@@ -4,6 +4,9 @@
 (uin/pass_ticket 等),去参保留 __biz/mid/idx/sn 后即公网可开的 canonical 链接。
 验收实测(2026-09-03):chksm 是会话级签名,同一文章每次提取都不同
 (同 sn 三次提取三个 chksm),不能作身份 —— canonical 不保留 chksm。
+尖峰D(2026-09-03):「··· → 复制链接」菜单给的是短链
+`https://mp.weixin.qq.com/s/<token>` —— token 即文章身份且永久有效,
+直接作 canonical(dedup key = 短链)。
 """
 from __future__ import annotations
 
@@ -12,6 +15,7 @@ import re
 from datetime import date, timedelta
 
 MP_URL_RE = re.compile(r"^https?://mp\.weixin\.qq\.com/s\?\S+$")
+SHORT_URL_RE = re.compile(r"^https?://mp\.weixin\.qq\.com/s/([A-Za-z0-9_-]+)$")
 CANONICAL_PARAMS = ("__biz", "mid", "idx", "sn")
 
 _WEEKDAYS = {"星期一": 0, "星期二": 1, "星期三": 2, "星期四": 3,
@@ -19,10 +23,18 @@ _WEEKDAYS = {"星期一": 0, "星期二": 1, "星期三": 2, "星期四": 3,
 
 
 def canonicalize_url(url: str | None) -> str | None:
-    """提取并精简 mp 文章 URL(4 参数 canonical);非 mp 文章 URL 返回 None。"""
+    """提取并精简 mp 文章 URL;非 mp 文章 URL 返回 None。
+
+    两种合法形态:① `s?__biz=…&sn=…` 全参链接 → 精简到 4 参数;
+    ② `s/<token>` 短链(「复制链接」菜单产物)→ 归一为 https 后原样作
+    canonical(token 永久,即身份)。
+    """
     if not url:
         return None
     url = str(url).strip()
+    m = SHORT_URL_RE.match(url.split("#", 1)[0])
+    if m:
+        return "https://mp.weixin.qq.com/s/" + m.group(1)
     if not MP_URL_RE.match(url):
         return None
     query = url.split("?", 1)[1].split("#", 1)[0]

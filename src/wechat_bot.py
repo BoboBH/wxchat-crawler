@@ -8,8 +8,8 @@
   * 搜索输入必须剪贴板粘贴(SetValue 不触发页面事件),依赖桌面已解锁;
   * 文章 URL 只在文章页的 ValuePattern.Value 出现,列表页永远拿不到;
   * 激活 tab 的「关闭」按钮 rect 完整落在 Tab rect 内(非激活 tab 是错位悬停位);
-  * 文章页可内嵌大量**别人的** mp URL(2026-09-03 实测一篇 475 个),
-    树内多候选时不得「最短者」猜链,须有页面自身 URL 的兜底路线。
+  * 文章页可内嵌大量**别人的** mp URL(尖峰D 实测一篇 475 个),页自身 URL
+    用「··· → 复制链接」菜单兜底(AppMenuButton 只能 Click 弹层,剪贴板取链)。
 
 微信大版本更新后:用 tools/spike_uia.py --browser --web-only 重新校准以下常量。
 """
@@ -39,8 +39,22 @@ TITLE_AIDS = ("activity-name", "js_name")  # 文章页自身标题控件 aid(校
 URL_RE = re.compile(r"https?://mp\.weixin\.qq\.com/s\?\S+")
 # 空白 + 常见零宽不可见字符(微信标题里偶见),标题比对前全部剔除
 INVISIBLE_RE = re.compile("[\\s\\u200b\\u200c\\u200d\\u2060\\ufeff]+")
+# 「···」菜单(尖峰D):按钮在浏览器工具条,菜单项是页内 FlueMenuItemView
+MORE_BUTTON_CLASS = "AppMenuButton"
+MORE_BUTTON_NAME = "更多"
+MENU_ITEM_CLASS = "FlueMenuItemView"
+COPY_LINK_NAME = "复制链接"
+CF_UNICODETEXT = 13
 
 USER32 = ctypes.windll.user32
+K32 = ctypes.windll.kernel32
+# 64 位下句柄是 64 位,必须显式声明 restype/argtypes,否则被截断成 32 位
+USER32.OpenClipboard.argtypes = [ctypes.c_void_p]
+USER32.GetClipboardData.argtypes = [ctypes.c_uint]
+USER32.GetClipboardData.restype = ctypes.c_void_p
+K32.GlobalLock.argtypes = [ctypes.c_void_p]
+K32.GlobalLock.restype = ctypes.c_void_p
+K32.GlobalUnlock.argtypes = [ctypes.c_void_p]
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -534,10 +548,10 @@ def scan_article_page(host, max_nodes: int = 12000, max_depth: int = 40):
 
     返回 (title, {url: 控件名}, 遍历节点数)。标题取 aid ∈ TITLE_AIDS 控件的
     非空 Name,activity-name(文章 <h1>)优先于 js_name —— js_name 是
-    **公众号名**而非标题,且遍历序里常先出现(实测 node 3635 vs 3644),
+    **公众号名**而非标题,且遍历序里常先出现(尖峰D 实测 node 3635 vs 3644),
     拿它当标题会把每篇都判成「标题不符」;URL 为 ValuePattern 命中 URL_RE 者。
 
-    两个实测事实决定了本函数的形态(2026-09-03 实测,郭磊宏观茶座
+    两个实测事实决定了本函数的形态(尖峰D,2026-09-03,郭磊宏观茶座
     「沃什Jackson Hole演讲」一篇):
       * 标题 aid 落在 a11y 树**尾部**(node≈3635/3647,而 js_content 在
         node≈74)—— 按正文锚点的节点预算(1200)扫标题必然落空;
@@ -628,11 +642,12 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
     标题 TextControl 自身无 InvokePattern,向上最多 5 级找可 Invoke 的祖先卡片
     (尖峰C:class js_article_card…)。
 
-    URL 取用策略(2026-09-03 实测后):
+    URL 取用策略(尖峰D 实测后):
       * 树内恰 1 个 mp URL → 直接用(中金点睛 13 篇全为此形态,主路径不变);
-      * 树内 0 个或 ≥2 个(嵌入链接污染)→ 本版直接 pending(返回 (None, 0)),
-        **不再**用「最短者」猜 —— 验收实测最短者是别人的文章(一篇 475 个
-        内链里最短者为主文外的一篇);「··· → 复制链接」菜单兜底随后加入。
+      * 树内 0 个或 ≥2 个(嵌入链接污染)→ 用「··· → 复制链接」菜单兜底
+        (复制的是页面自身 URL,见 copy_link_via_menu);菜单也拿不到时
+        返回 (None, 0) 留待下轮,**不再**用「最短者」猜 —— 验收实测最短者
+        是别人的文章(本篇 475 个内链里最短者为主文外的一篇)。
     """
     # 残留文章页防护:上一篇文章 tab 未关成功时,提取会拿到上一篇文章的 URL。
     if find_article_host(timeout=0.5)[1] is not None:
@@ -660,7 +675,7 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
         pat.Invoke()
     except Exception:
         return None, -1
-    _w, h = find_article_host(timeout=open_timeout)
+    win, h = find_article_host(timeout=open_timeout)
     if h is None:
         close_article_tabs(max_close=2, wait=close_wait)
         return None, -1
@@ -682,10 +697,125 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
         return None, -2
     if len(urls) == 1:
         return next(iter(urls)), 1
-    # 0 个或 ≥2 个候选:宁 pending 也不猜(见 docstring 策略)。
+    # 0 个或 ≥2 个候选:菜单兜底(copy 的就是本页 URL,不受内嵌链接污染)。
+    menu_url = copy_link_via_menu(close_wait=close_wait, win=win) if title_ok else None
     if not close_active_tab(wait=close_wait):
         close_article_tabs(max_close=2, wait=close_wait)
+    if menu_url:
+        return menu_url, len(urls) or 1
     return None, 0
+
+
+def _read_clipboard_text() -> str:
+    """ctypes 读剪贴板 CF_UNICODETEXT;失败/为空返回 ''。"""
+    try:
+        if not USER32.OpenClipboard(None):
+            return ""
+        try:
+            if not USER32.IsClipboardFormatAvailable(CF_UNICODETEXT):
+                return ""
+            handle = USER32.GetClipboardData(CF_UNICODETEXT)
+            ptr = K32.GlobalLock(handle) if handle else None
+            if not ptr:
+                return ""
+            try:
+                return ctypes.wstring_at(ptr)
+            finally:
+                K32.GlobalUnlock(ptr)
+        finally:
+            USER32.CloseClipboard()
+    except Exception:
+        return ""
+
+
+def _dismiss_menu():
+    """尽力关掉仍开着的「···」菜单(Esc 合成键,锁屏下无效但不抛错)。"""
+    try:
+        uia.SendKeys("{Esc}")
+        time.sleep(0.6)
+    except Exception:
+        pass
+
+
+def copy_link_via_menu(close_wait: float = 2.5, win=None) -> str | None:
+    """「··· → 复制链接」菜单兜底:返回页面自身 raw URL,失败返回 None。
+
+    尖峰D 实测(2026-09-03,郭磊宏观茶座,连续 2 次成功):
+      * 入口是浏览器工具条 `AppMenuButton Name=更多`(无 InvokePattern;
+        ExpandCollapse / LegacyIAccessible.DoDefaultAction 均不弹层),
+        只有合成鼠标 `Click` 能打开菜单 —— 因此锁屏下不可用;
+      * 菜单项为 `FlueMenuItemView Name=复制链接`(无独立顶层窗口,
+        就在本 AppEx 窗口树里),Invoke 后剪贴板得到
+        `https://mp.weixin.qq.com/s/<token>` 短链(永久,canonical 直接用);
+      * 菜单复制的是**当前页自身** URL,不受页内嵌入链接污染。
+    剪贴板先存后还在 finally 恢复;任何异常都吞掉(调用方还有返回 None
+    后的 pending 路径)。win 给定时只在该窗口找「更多」按钮(多窗口时
+    避免点到别的窗口菜单)。
+    """
+    clip = ""
+    try:
+        clip = uia.GetClipboardText() or ""
+    except Exception:
+        pass
+    url = None
+    try:
+        targets = [win] if win is not None else appex_windows()
+        if not targets or targets[0] is None:
+            return None
+        btn = None
+        for t in targets:
+            for c in walk_ctrls(t, max_nodes=6000):
+                try:
+                    if (c.ClassName or "") == MORE_BUTTON_CLASS and \
+                            (c.Name or "") == MORE_BUTTON_NAME:
+                        btn = c
+                        break
+                except Exception:
+                    continue
+            if btn is not None:
+                break
+        if btn is None:
+            return None
+        try:
+            btn.Click(simulateMove=False)
+        except Exception:
+            return None
+        item = None
+        t0 = time.time()
+        while time.time() - t0 < 3.0:
+            for t in appex_windows(retries=1):
+                for c in walk_ctrls(t, max_nodes=8000):
+                    try:
+                        if (c.ClassName or "") == MENU_ITEM_CLASS and \
+                                COPY_LINK_NAME in (c.Name or ""):
+                            item = c
+                            break
+                    except Exception:
+                        continue
+                if item is not None:
+                    break
+            if item is not None:
+                break
+            time.sleep(0.4)
+        if item is None:
+            _dismiss_menu()
+            return None
+        if not invoke_control(item):
+            _dismiss_menu()
+            return None
+        time.sleep(2.0)
+        raw = _read_clipboard_text().strip()
+        if raw.startswith("http") and "mp.weixin.qq.com/s" in raw:
+            url = raw
+    except Exception:
+        url = None
+    finally:
+        time.sleep(0.3)
+        try:
+            uia.SetClipboardText(clip)
+        except Exception:
+            pass
+    return url
 
 
 if __name__ == "__main__":
