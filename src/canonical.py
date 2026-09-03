@@ -1,8 +1,9 @@
 """纯函数:URL 规范化、dedup_key、日期文本归一化、列表日期配对、停止判定。
 
 依据 docs/spike-findings.md 尖峰C:文章页提取的原始 URL 带跟踪参数
-(uin/pass_ticket 等),去参保留 __biz/mid/idx/sn/chksm 五参数后即公网可开的
-canonical 链接;同一文章多次提取逐字节一致,可作稳定去重键。
+(uin/pass_ticket 等),去参保留 __biz/mid/idx/sn 后即公网可开的 canonical 链接。
+验收实测(2026-09-03):chksm 是会话级签名,同一文章每次提取都不同
+(同 sn 三次提取三个 chksm),不能作身份 —— canonical 不保留 chksm。
 """
 from __future__ import annotations
 
@@ -11,14 +12,14 @@ import re
 from datetime import date, timedelta
 
 MP_URL_RE = re.compile(r"^https?://mp\.weixin\.qq\.com/s\?\S+$")
-CANONICAL_PARAMS = ("__biz", "mid", "idx", "sn", "chksm")
+CANONICAL_PARAMS = ("__biz", "mid", "idx", "sn")
 
 _WEEKDAYS = {"星期一": 0, "星期二": 1, "星期三": 2, "星期四": 3,
              "星期五": 4, "星期六": 5, "星期日": 6, "星期天": 6}
 
 
 def canonicalize_url(url: str | None) -> str | None:
-    """提取并精简 mp 文章 URL(5 参数 canonical);非 mp 文章 URL 返回 None。"""
+    """提取并精简 mp 文章 URL(4 参数 canonical);非 mp 文章 URL 返回 None。"""
     if not url:
         return None
     url = str(url).strip()

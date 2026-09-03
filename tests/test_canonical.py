@@ -9,12 +9,19 @@ RAW_URL = ("https://mp.weixin.qq.com/s?__biz=MzI3MDMzMjg0MA==&mid=2247857353&idx
            "&chksm=eb6a7778638a3b11c8bff50586d670f685a1cf793c071895f6fa4ef18039364415213f6fecd9"
            "&scene=126&sessionid=0&clicktime=123&enterid=456&key=abc&uin=26&pass_ticket=xyz#rd")
 CANON_URL = ("https://mp.weixin.qq.com/s?__biz=MzI3MDMzMjg0MA==&mid=2247857353&idx=2"
-             "&sn=ae957b8c2f9ef7bcf0c0a1c438f2722c"
-             "&chksm=eb6a7778638a3b11c8bff50586d670f685a1cf793c071895f6fa4ef18039364415213f6fecd9")
+             "&sn=ae957b8c2f9ef7bcf0c0a1c438f2722c")
 
 
 def test_canonicalize_real_url():
     assert canonicalize_url(RAW_URL) == CANON_URL
+
+
+def test_canonical_ignores_session_chksm():
+    """验收实测:同一文章每次提取的 chksm 都不同(会话签名),canonical 必须一致。"""
+    other_session = RAW_URL.replace("chksm=eb6a7778", "chksm=eb7e60f5")
+    assert other_session != RAW_URL
+    assert canonicalize_url(other_session) == CANON_URL
+    assert canonicalize_url(RAW_URL.rsplit("&chksm=", 1)[0]) == CANON_URL
 
 
 def test_canonicalize_none_cases():
