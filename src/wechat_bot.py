@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import re
 import time
 
@@ -45,6 +46,9 @@ MORE_BUTTON_NAME = "更多"
 MENU_ITEM_CLASS = "FlueMenuItemView"
 COPY_LINK_NAME = "复制链接"
 CF_UNICODETEXT = 13
+
+# 与 orchestrator 同名 logger(诊断日志走同一文件;自愈层只在异常时发声)
+_log = logging.getLogger("crawler")
 
 USER32 = ctypes.windll.user32
 K32 = ctypes.windll.kernel32
@@ -521,17 +525,27 @@ def _main_window_candidates() -> list:
     只按「进程名 + 非 AppEx 类」筛不够:最大化的独立聊天窗(同为 weixin.exe
     的 Qt 窗)面积可压过主窗,合成热键/粘贴会落进聊天。主窗的文档化身份即
     类名形如 Qt51514QWindowIcon、Name=微信,三者必须同时满足;一个都不满足
-    时自愈安全失败(宁不引导,不误键入)。"""
-    out = []
+    时自愈安全失败(宁不引导,不误键入)。
+    Name 先 strip 再比对(UIA 文本偶见尾部空白);进程+类名已中而 Name 不符
+    (未读数变体「微信(3)」/非中文 UI)的候选打一条 WARNING 再拒 —— 否则
+    自愈会永久静默失败,巡检时无从得知为何找不到主窗。过滤本身不放宽。"""
+    out, mismatched = [], []
     try:
         for c in uia.GetRootControl().GetChildren():
             try:
-                if process_name(c.ProcessId).lower() == MAIN_WINDOW_PROCESS and \
-                        (c.ClassName or "").startswith("Qt") and \
-                        (c.Name or "") == "微信":
+                if process_name(c.ProcessId).lower() != MAIN_WINDOW_PROCESS or \
+                        not (c.ClassName or "").startswith("Qt"):
+                    continue
+                if (c.Name or "").strip() == "微信":
                     out.append(c)
+                else:  # 只在真的拒掉时记(一次自愈至多两条),不额外去重
+                    mismatched.append(c)
             except Exception:
                 continue
+        if mismatched:
+            _log.warning("微信主窗身份不匹配: %s(按 Name=='微信' 过滤)",
+                         ";".join(f"Name='{(c.Name or '').strip()}' "
+                                  f"ClassName='{c.ClassName}'" for c in mismatched))
     except Exception:
         pass
     return out
@@ -585,6 +599,11 @@ def _bootstrap_once(account: str, shortcut: str, poll_sec: float) -> tuple[bool,
             return False, f"主窗口未置前,跳过合成键(避免误入其他应用){tail}"
         uia.SendKeys(shortcut)
         time.sleep(1.0)
+        # 前台校验只保护了 {Ctrl}f:到粘贴三连还有 ~1.2s,此窗口期前台可能
+        # 被抢(Ctrl+A/V/Enter 落进用户应用是破坏性的),发前必须再复核。
+        # 此处中止无害:搜索框刚聚焦且为空,微信停在搜一搜页。
+        if not _foreground_is(hwnd):
+            return False, "键入中前台被抢,跳过本次引导(避免误入其他应用)"
         uia.SetClipboardText(account)
         uia.SendKeys("{Ctrl}a")
         uia.SendKeys("{Ctrl}v")

@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from contextlib import contextmanager
 from datetime import date, timedelta
 
 from . import canonical, version_check, wechat_bot as bot
@@ -25,11 +26,40 @@ def setup_logging(log_dir) -> logging.Logger:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",  # 每行带完整日期:跨日巡检/与 crawl_runs 对得上
         handlers=[logging.FileHandler(logfile, encoding="utf-8"),
                   logging.StreamHandler()],
         force=True,
     )
     return logging.getLogger("crawler")
+
+
+def fmt_duration(seconds: float) -> str:
+    """38.24 → '38.2s';272.34 → '4分32.3s'(逐篇用秒,整号/整轮用分)。"""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(seconds, 60)
+    return f"{int(m)}分{s:.1f}s"
+
+
+@contextmanager
+def log_step(log: logging.Logger, fmt: str, *args):
+    """步骤计时:进入打「<fmt> …」,正常退出打「<fmt> 完成[(尾注)] 用时Xs」,
+    异常打「<fmt> 失败 用时Xs」后原样抛出(外层照常记堆栈)。块内往 yield
+    出的列表追加尾注(条数/结果),完成行以「(尾注)」带出。
+    仅适用于无失败早退的步骤;带早退的(如打开主页)手动计时,失败才不会
+    被记成误导性的「完成」。"""
+    t0 = time.perf_counter()
+    tail: list[str] = []
+    log.info(fmt + " …", *args)
+    try:
+        yield tail
+    except Exception:
+        log.info(fmt + " 失败 用时%s", *args, fmt_duration(time.perf_counter() - t0))
+        raise
+    extra = f"({tail[0]})" if tail else ""
+    log.info(fmt + " 完成%s 用时%s", *args, extra,
+             fmt_duration(time.perf_counter() - t0))
 
 
 def run_check(cfg: CrawlConfig) -> int:
@@ -75,12 +105,15 @@ def _collect_list(cfg: CrawlConfig, host, cutoff: str | None):
 
 
 def process_account(store: Store, cfg: CrawlConfig, name: str,
-                    log: logging.Logger) -> dict:
+                    log: logging.Logger, position: str | None = None) -> dict:
     """抓一个账号,返回 {ok, new, upgraded, pending, message}。
 
-    主页每轮都经搜索重新打开(不复用已开的旧 tab):旧 tab 列表不刷新,
-    会导致每轮扫到同一份旧列表、0 新增、水位线永久冻结。
+    position 为「1/2」形式的序号(仅用于日志);主页每轮都经搜索重新打开
+    (不复用已开的旧 tab):旧 tab 列表不刷新,会导致每轮扫到同一份旧列表、
+    0 新增、水位线永久冻结。
     """
+    t_acc = time.perf_counter()
+    log.info("[%s] 开始处理账号%s", name, f"({position})" if position else "")
     acc_id = store.get_or_create_account(name)
     watermark = store.watermark(acc_id)
     cutoff = None
@@ -88,6 +121,9 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
         cutoff = (date.fromisoformat(watermark) -
                   timedelta(days=cfg.overlap_days)).isoformat()
 
+    # 打开主页带失败早退,手动计时(失败打「失败 用时」而非「完成」)
+    t_prof = time.perf_counter()
+    log.info("[%s] 搜索并打开主页 …", name)
     ok, msg = bot.search_open_profile(name)
     if not ok and bot.SEARCH_PAGE_MISSING in (msg or ""):
         # AppEx 搜索页 tab 会被微信在数小时内回收:自动引导一次再重试,
@@ -100,17 +136,25 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
         else:
             log.warning("[%s] 自动引导失败: %s", name, heal_msg)
     if not ok:
+        log.info("[%s] 搜索并打开主页 失败 用时%s: %s", name,
+                 fmt_duration(time.perf_counter() - t_prof), msg)
         bot.close_profile_tab(name, wait=cfg.close_tab_wait_sec)  # 尽力清理半开 tab
         return {"ok": False, "new": 0, "upgraded": 0, "pending": 0, "message": msg}
     w, host = bot.find_profile_host(account=name, kicks=cfg.kick_retry)
     if host is None:
+        log.info("[%s] 搜索并打开主页 失败 用时%s: 主页已搜索但未就绪", name,
+                 fmt_duration(time.perf_counter() - t_prof))
         bot.close_profile_tab(name, wait=cfg.close_tab_wait_sec)  # 尽力清理
         return {"ok": False, "new": 0, "upgraded": 0, "pending": 0,
                 "message": "主页已搜索但未就绪"}
     if not bot.close_article_tabs(max_close=2, wait=cfg.close_tab_wait_sec):
         log.warning("[%s] 存在残留文章 tab,继续(提取前仍会校验)", name)
+    log.info("[%s] 搜索并打开主页 完成 用时%s", name,
+             fmt_duration(time.perf_counter() - t_prof))
 
-    title_ctrls, pairs, dates = _collect_list(cfg, host, cutoff)
+    with log_step(log, "[%s] 列表扫描", name) as scanned:
+        title_ctrls, pairs, dates = _collect_list(cfg, host, cutoff)
+        scanned.append(f"{len(pairs)}条")
     if not pairs:
         store.mark_crawled(acc_id)
         bot.close_profile_tab(name, wait=cfg.close_tab_wait_sec)
@@ -127,7 +171,8 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
     new = upgraded = pending = 0
     max_date = watermark
     processed = 0
-    for t_ctrl, (title, date_text) in zip(title_ctrls, pairs):
+    total = len(pairs)
+    for pos, (t_ctrl, (title, date_text)) in enumerate(zip(title_ctrls, pairs), 1):
         if not title:
             continue
         if processed:
@@ -138,6 +183,8 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
             max_date = iso
         if fb in seen:
             continue  # 已入库且 URL ok,不重复打开文章页
+        t_art = time.perf_counter()
+        log.info("[%s] 第%d/%d篇《%.20s》打开文章页提取URL …", name, pos, total, title)
         raw, nodes = bot.open_article_and_get_url(
             t_ctrl, open_timeout=cfg.article_open_timeout_sec,
             scan_timeout=cfg.url_scan_timeout_sec,
@@ -157,8 +204,22 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
         url_state = "ok" if canon else (
             "标题不符PENDING" if nodes == -2 else
             ("未打开PENDING" if nodes == -1 else "PENDING"))
-        log.info("[%s] + %s (%s) url=%s", name, title[:40],
-                 date_text or "?", url_state)
+        # 结果大类(与 url_state 互补:url= 交代 pending 细因,→ 交代入库走向)
+        if result == "new" and canon:
+            outcome = "新增"
+        elif result == "new" and nodes == -2:
+            outcome = "待补-标题不符"
+        elif result == "new" and nodes == -1:
+            outcome = "待补-未打开"
+        elif result == "new":
+            outcome = "待补"
+        elif result == "upgraded":
+            outcome = "升级"
+        else:
+            outcome = "已存在"
+        log.info("[%s] + %s (%s) url=%s → %s(用时%s)", name, title[:40],
+                 date_text or "?", url_state, outcome,
+                 fmt_duration(time.perf_counter() - t_art))
         processed += 1
 
     if max_date:
@@ -172,6 +233,7 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
 
 def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
     log = setup_logging(cfg.log_dir)
+    t_run = time.perf_counter()
     rep = version_check.check_environment(
         cfg.process_name, cfg.exe_path, cfg.expected_version_prefix)
     log.info("环境: %s", rep["message"])
@@ -181,6 +243,8 @@ def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
     names = [only_account] if only_account else list(cfg.accounts)
     if only_account is None:
         random.shuffle(names)  # 全量轮乱序,模拟真人
+    log.info("本轮开始: 共%d个账号%s", len(names),
+             f"(仅 {only_account})" if only_account else "")
     store = Store(cfg.db_path)
     run_id = store.start_run()
     ok_n = fail_n = new_n = 0
@@ -188,11 +252,13 @@ def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
         for i, name in enumerate(names):
             if i:
                 gap = random.uniform(cfg.account_gap_min_sec, cfg.account_gap_max_sec)
-                log.info("等待 %.0fs 后处理下一个账号", gap)
+                log.info("等待 %.1fs 后处理下一账号(防风控)", gap)  # 先说明再睡,时间线不断档
                 time.sleep(gap)
             log.info("=== 账号[%d/%d] %s ===", i + 1, len(names), name)
+            t_acc = time.perf_counter()
             try:
-                st = process_account(store, cfg, name, log)
+                st = process_account(store, cfg, name, log,
+                                     position=f"{i + 1}/{len(names)}")
             except Exception:
                 log.exception("账号 %s 处理异常", name)
                 st = {"ok": False, "new": 0, "upgraded": 0, "pending": 0,
@@ -204,9 +270,11 @@ def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
             ok_n += 1 if st["ok"] else 0
             fail_n += 0 if st["ok"] else 1
             new_n += st["new"]
-            log.info("账号 %s: %s", name, st["message"])
+            log.info("账号 %s: %s(用时%s)", name, st["message"],
+                     fmt_duration(time.perf_counter() - t_acc))
     finally:
         store.finish_run(run_id, ok_count=ok_n, fail_count=fail_n, new_count=new_n)
         store.close()
-    log.info("本轮完成: 成功%d 失败%d 新增%d", ok_n, fail_n, new_n)
+    log.info("本轮完成: 成功%d 失败%d 新增%d(总耗时%s)", ok_n, fail_n, new_n,
+             fmt_duration(time.perf_counter() - t_run))
     return 0 if fail_n == 0 else 1

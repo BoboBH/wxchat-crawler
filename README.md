@@ -49,7 +49,9 @@ D:\Python312\python.exe -m venv .venv
 
 ## 运行与排障
 
-- 日志:`logs\crawl_YYYY-MM-DD.log`(正常轮次各写一条 `crawl_runs` 记录(环境预检未通过的轮次不写))。
+- 日志:`logs\crawl_YYYY-MM-DD.log`;每行都带完整日期时间,每个步骤
+  (含逐篇文章)打印 `用时`,账号间隔等空档也会注明缘由,可直接对着
+  时间线看进展与耗时(正常轮次各写一条 `crawl_runs` 记录,环境预检未通过的轮次不写)。
 - `url_status='pending'` 的文章 = 当轮没提取到 URL(可能是无页内链接的
   简排版文章、超时、或打开的页与标题不符/链接归属存疑 —— 日志以
   `PENDING`/`未打开PENDING`/`标题不符PENDING` 区分);次日该文仍在列表时
