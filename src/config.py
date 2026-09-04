@@ -1,4 +1,4 @@
-"""配置加载:settings.yaml(参数+钉钉通知)+ accounts.yaml(公众号名单)。"""
+"""配置加载:settings.yaml(参数+钉钉通知+MySQL 镜像)+ accounts.yaml(公众号名单)。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -36,6 +36,7 @@ class CrawlConfig:
     log_dir: Path
     accounts: list[str] = field(default_factory=list)
     notify: "NotifyConfig" = field(default_factory=lambda: NotifyConfig())
+    mysql: "MysqlConfig" = field(default_factory=lambda: MysqlConfig())
 
 
 @dataclass
@@ -50,6 +51,20 @@ class NotifyConfig:
     at_user_ids: list[str] = field(default_factory=list)  # userId(可@机器人)
     at_mobiles: list[str] = field(default_factory=list)   # 手机号(真@提醒)
     at_all: bool = False
+
+
+@dataclass
+class MysqlConfig:
+    """MySQL 镜像库:每轮抓取结束把 SQLite 全量同步过去(SQLite 仍是主库)。"""
+
+    enabled: bool = False
+    host: str = "localhost"
+    port: int = 3306
+    user: str = "root"
+    password: str = ""          # 本机开发库凭据,settings.yaml 勿外传
+    database: str = "wechat_crawler"
+    table_accounts: str = "wechat_crawler_accounts"
+    table_articles: str = "wechat_crawler_articles"
 
 
 def _require(d: dict, key: str, where: str):
@@ -87,6 +102,24 @@ def _parse_notify(n) -> NotifyConfig:
         at_user_ids=_parse_str_list(n.get("at_user_ids"), "notify.at_user_ids"),
         at_mobiles=_parse_str_list(n.get("at_mobiles"), "notify.at_mobiles"),
         at_all=_parse_bool(n.get("at_all", False), "notify.at_all"),
+    )
+
+
+def _parse_mysql(m) -> MysqlConfig:
+    if m is not None and not isinstance(m, dict):
+        raise ConfigError("settings.mysql 必须是键值映射")
+    m = m or {}
+    return MysqlConfig(
+        enabled=_parse_bool(m.get("enabled", False), "mysql.enabled"),
+        host=str(m.get("host") or "localhost").strip(),
+        port=int(m.get("port") or 3306),
+        user=str(m.get("user") or "root").strip(),
+        password=str(m.get("password") or ""),
+        database=str(m.get("database") or "wechat_crawler").strip(),
+        table_accounts=str(m.get("table_accounts")
+                           or "wechat_crawler_accounts").strip(),
+        table_articles=str(m.get("table_articles")
+                           or "wechat_crawler_articles").strip(),
     )
 
 
@@ -144,4 +177,5 @@ def load_config(settings_path=DEFAULT_SETTINGS,
     cfg.notify = _parse_notify(s.get("notify"))
     if cfg.notify.enabled and not cfg.notify.webhook:
         raise ConfigError("notify.enabled=true 但 notify.webhook 为空")
+    cfg.mysql = _parse_mysql(s.get("mysql"))
     return cfg

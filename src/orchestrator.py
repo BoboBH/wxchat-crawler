@@ -14,7 +14,7 @@ import time
 from contextlib import contextmanager
 from datetime import date, timedelta
 
-from . import canonical, notify as notify_mod, version_check, wechat_bot as bot
+from . import canonical, mysql_sync, notify as notify_mod, version_check, wechat_bot as bot
 from .canonical import find_stop_index, make_dedup_key, normalize_date_text, pair_publish_dates
 from .config import CrawlConfig, NotifyConfig
 from .db import Store
@@ -353,6 +353,19 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
             "message": f"扫描{len(pairs)}条,新增{new},补URL{upgraded},待补{pending}"}
 
 
+def sync_mysql(cfg: CrawlConfig, conn, log: logging.Logger) -> None:
+    """轮末把 SQLite 镜像进 MySQL(单向,SQLite 是主库;见 mysql_sync)。
+
+    失败仅告警不重抛:镜像库不可用不能拖垮抓取主流程,缺行下轮自动补齐。
+    """
+    if not (cfg.mysql and cfg.mysql.enabled):
+        return
+    try:
+        mysql_sync.sync_store(cfg.mysql, conn, log=log)
+    except Exception:
+        log.exception("[MySQL] 同步失败(SQLite 不受影响,下轮自动补齐)")
+
+
 def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
     log = setup_logging(cfg.log_dir)
     t_run = time.perf_counter()
@@ -397,6 +410,7 @@ def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
                      fmt_duration(time.perf_counter() - t_acc))
     finally:
         store.finish_run(run_id, ok_count=ok_n, fail_count=fail_n, new_count=new_n)
+        sync_mysql(cfg, store.conn, log)  # MySQL 镜像;store 关闭前读 SQLite
         store.close()
     log.info("本轮完成: 成功%d 失败%d 新增%d(总耗时%s)", ok_n, fail_n, new_n,
              fmt_duration(time.perf_counter() - t_run))
