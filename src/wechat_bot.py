@@ -29,6 +29,7 @@ HOST_CLASS = "Chrome_RenderWidgetHostHWND"  # 网页内容宿主(aid 每次导�
 CLASS_TITLE = "article__item__title"      # 主页列表条目标题
 CLASS_TIME = "publish_time"               # 主页日期分组标签
 CLASS_CARD = "js_article_card"            # 列表条目卡片(带 InvokePattern)
+CLASS_MORE_BAR = "article-list__more-bar"  # 「余下N篇」折叠条(InvokePattern 展开)
 SEARCH_INPUT_ID = "weixin-search-input"   # 搜索页输入框 AutomationId
 SEARCH_BUTTON_NAME = "搜索"                # 搜索触发按钮
 CLASS_RESULT_CARD = "header-detail"       # 搜索结果卡片(公众号/小程序等同名前缀,需再筛)
@@ -341,6 +342,56 @@ def scan_list(host, max_nodes: int = 4000):
                 continue
     titles.sort(key=lambda x: x[1])
     return [t[0] for t in titles], times
+
+
+def find_fold_bars(host, max_nodes: int = 4000) -> list:
+    """收集主页列表所有「余下N篇」折叠条(article-list__more-bar)。
+
+    多图文推送的组卡只显示头条,余篇收进折叠条;条带 InvokePattern,
+    Invoke 后组内余篇文章就地展开(见 expand_fold_bars)。
+    """
+    bars = []
+    for c in walk_ctrls(host, max_nodes=max_nodes):
+        try:
+            if (c.ClassName or "") == CLASS_MORE_BAR:
+                bars.append(c)
+        except Exception:
+            continue
+    return bars
+
+
+def expand_fold_bars(host, max_nodes: int = 4000, rounds: int = 3,
+                     settle: float = 1.0) -> int:
+    """展开主页列表全部「余下N篇」折叠组,返回成功展开的组数。
+
+    2026-09-04 真机定律(中金点睛):
+      * more-bar 自带 InvokePattern,UIA Invoke 后台生效,不依赖前台/
+        视口内(y=4263 视口外条 Invoke 后照常展开),不动鼠标;
+      * 展开是就地追加(标题 10→11),新标题落在组日期标签之下,
+        pair_publish_dates 按上方最近标签自动继承组日期;
+      * 展开状态跨滚动保留;展开后折叠条从树中消失 → 无重复触发,
+        逐轮「找条→Invoke→等 settle」直到一轮找不到条即收;
+      * 深滚激活的整棵树一次即可扫全折叠条;轮数上限兜底树延迟激活。
+    """
+    expanded = 0
+    for _ in range(max(rounds, 1)):
+        bars = find_fold_bars(host, max_nodes=max_nodes)
+        if not bars:
+            break
+        for b in bars:
+            try:
+                pat = b.GetPattern(uia.PatternId.InvokePattern)
+            except Exception:
+                continue
+            if pat is None:
+                continue
+            try:
+                pat.Invoke()
+                expanded += 1
+            except Exception:
+                continue
+        time.sleep(settle)
+    return expanded
 
 
 def _wheel_point(host):

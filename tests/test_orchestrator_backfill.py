@@ -75,11 +75,13 @@ class _Recorder:
 
 @pytest.fixture
 def rec(monkeypatch):
-    def _install(screens, bases=None):
+    def _install(screens, bases=None, expanded=0):
         r = _Recorder(screens, bases)
         monkeypatch.setattr(orchestrator.bot, "scan_list", r.scan_list)
         monkeypatch.setattr(orchestrator.bot, "scroll_once", r.scroll_once)
         monkeypatch.setattr(orchestrator.bot, "scroll_to_top", r.scroll_to_top)
+        monkeypatch.setattr(orchestrator.bot, "expand_fold_bars",
+                            lambda host, max_nodes=0: expanded)
         return r
     return _install
 
@@ -236,6 +238,31 @@ def test_new_account_path_unchanged(tmp_path, rec):
     assert r.scrolls == 2              # new_account_screens=2
     assert r.tops == 2                 # 起始回顶 + 收尾回顶
     assert len(pairs) == 3
+
+
+# ------------------------------------------------ 「余下N篇」折叠组展开
+
+def test_expand_fold_bars_reveals_hidden_article(tmp_path, rec):
+    """多图文折叠:折叠条 Invoke 展开后重扫,余篇文章继承组日期进采集
+    (2026-09-04 真机:中金点睛首屏 4 组折叠,不展开就漏抓)。"""
+    r = rec(screens=[
+        [("头条", "2026-09-03"), ("旧文", "2026-08-25")],  # 首扫(已覆盖,停滚)
+        # 展开后重扫:余篇就地插在头条之下,继承组日期;旧文仍在更下
+        [("头条", "2026-09-03"), ("余篇", "2026-09-03"), ("旧文", "2026-08-25")],
+    ], expanded=1)
+    _titles, pairs, dates = orchestrator._collect_list(
+        _cfg(tmp_path), "host", "2026-08-28")
+    assert (r.scans, r.scrolls, r.tops) == (2, 0, 1)  # 首扫 + 展开后重扫
+    assert [t for t, _d in pairs] == ["头条", "余篇", "旧文"]
+    assert dates == ["2026-09-03", "2026-09-03", "2026-08-25"]  # 余篇继承组日期
+
+
+def test_no_fold_bars_no_extra_scan(tmp_path, rec):
+    r = rec([[("新文", "2026-09-03"), ("旧文", "2026-08-25")]])
+    _titles, pairs, _dates = orchestrator._collect_list(
+        _cfg(tmp_path), "host", "2026-08-28")
+    assert (r.scans, r.scrolls, r.tops) == (1, 0, 1)   # 无折叠零开销
+    assert len(pairs) == 2
 
 
 # --------------------------------- process_account 集成:真把漏网旧文补回来

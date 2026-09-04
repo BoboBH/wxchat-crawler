@@ -194,6 +194,13 @@ def _collect_list(cfg: CrawlConfig, host, cutoff: str | None,
             bot.scroll_to_top(host, wait=cfg.scroll_wait_sec)
             titles, times = bot.scan_list(host, max_nodes=cfg.max_tree_nodes)
             dbg("回顶重扫: %d 条", len(titles))
+    # 「余下N篇」折叠组:多图文只显示头条,余篇收在折叠条里不展开就漏抓
+    # (2026-09-04 真机:中金点睛首屏 4 组折叠=漏 4 篇)。深滚回顶后树里
+    # 已含窗口内全部组卡,UIA Invoke 后台展开,展开后重扫一遍。
+    n_exp = bot.expand_fold_bars(host, max_nodes=cfg.max_tree_nodes)
+    if n_exp:
+        titles, times = bot.scan_list(host, max_nodes=cfg.max_tree_nodes)
+        dbg("展开「余下N篇」折叠 %d 组 → 重扫 %d 条", n_exp, len(titles))
     pairs, dates = _pairs_and_dates(titles, times)
     return titles, pairs, dates
 
