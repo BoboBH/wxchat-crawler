@@ -163,6 +163,24 @@ def test_min_gap_throttle_between_sends(monkeypatch):
     assert sleeps and abs(sleeps[0] - 5.0) < 0.5  # 距上次发送不足 MIN_GAP → 先等
 
 
+def test_send_adds_wxcrawler_prefix_to_all_titles():
+    """机器人关键词=wxcrawler(2026-09-04):发送级统一给标题加前缀,两类消息全覆盖;
+    已带前缀的标题不重复加。"""
+    poster = _Poster([(200, {"errcode": 0}), (200, {"errcode": 0})])
+    notify_mod.send_article(_notify(), ROW, post=poster, sleep=_no_sleep)
+    notify_mod.send_markdown(_notify(), "本轮抓取总结", "正文",
+                             mention=False, post=poster, sleep=_no_sleep)
+    t1 = poster.calls[0][1]["markdown"]["title"]
+    t2 = poster.calls[1][1]["markdown"]["title"]
+    assert t1.startswith("wxcrawler:") and "新文章" in t1
+    assert t2 == "wxcrawler:本轮抓取总结"
+    # 幂等:标题已带前缀(重发场景)不叠加
+    poster2 = _Poster([(200, {"errcode": 0})])
+    notify_mod.send_markdown(_notify(), "wxcrawler:已带前缀", "正文",
+                             mention=False, post=poster2, sleep=_no_sleep)
+    assert poster2.calls[0][1]["markdown"]["title"] == "wxcrawler:已带前缀"
+
+
 # ------------------------------------------------ notify 配置加载
 
 SETTINGS_TMPL = """\
@@ -345,8 +363,10 @@ def test_run_pushes_per_article_when_enabled(tmp_path, monkeypatch):
     assert orchestrator.run(cfg) == 0
     # 文章逐篇 1 条 + 轮末总结 1 条(2026-09-04 新增轮级统计)
     assert len(poster.calls) == 2
-    assert poster.calls[0][1]["markdown"]["title"].startswith("新文章")
-    assert poster.calls[1][1]["markdown"]["title"].startswith("本轮抓取总结")
+    t1 = poster.calls[0][1]["markdown"]["title"]
+    t2 = poster.calls[1][1]["markdown"]["title"]
+    assert t1.startswith("wxcrawler:") and "新文章" in t1   # 关键词前缀保过检
+    assert t2.startswith("wxcrawler:") and "本轮抓取总结" in t2
 
 
 def test_run_disabled_notify_never_posts(tmp_path, monkeypatch):

@@ -27,6 +27,10 @@ from .config import NotifyConfig
 RETRIES = 2           # 首次 + 2 次重试 = 共 3 次尝试
 BACKOFF = (1.0, 3.0)  # 第 1/2 次重试前的等待秒数
 MIN_GAP = 3.0         # 两次发送的全局最小间隔秒(限流 20 条/分钟兜底)
+# 机器人自定义关键词 = wxcrawler(2026-09-04 用户设定并把机器人改成此关键词):
+# 所有消息标题统一加此前缀保证过检(310000 关键词不匹配),在 _send_with_retry
+# 统一注入——逐篇/告警/总结一条通道全覆盖。
+MESSAGE_PREFIX = "wxcrawler:"
 
 _last_send = -1e18    # 上次发送时刻(monotonic),模块级:跨账号/跨轮同样限流
 
@@ -162,7 +166,14 @@ def send_markdown(notify: NotifyConfig, title: str, text: str,
 
 def _send_with_retry(notify: NotifyConfig, payload: dict, post, sleep,
                      log=None) -> tuple[bool, str]:
-    """加签 + 限流 + 首次/2 次重试的发送通道;结果 (是否成功, 原因)。"""
+    """加签 + 限流 + 首次/2 次重试的发送通道;结果 (是否成功, 原因)。
+
+    发送前给标题统一加 MESSAGE_PREFIX(见常量注释)——机器人按标题关键词
+    放行,前缀是唯一的过检依赖,漏加会让无链接的告警/总结类消息被拒。
+    """
+    md = payload.get("markdown")
+    if md is not None and not (md.get("title") or "").startswith(MESSAGE_PREFIX):
+        md["title"] = MESSAGE_PREFIX + (md.get("title") or "")
     _throttle(sleep)
     url = sign_webhook(notify.webhook, notify.secret)
     last = ""
