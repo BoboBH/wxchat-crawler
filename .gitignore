@@ -13,3 +13,6 @@ tools/__pycache__/
 
 # MySQL 凭据(不入库)
 .env
+
+# 计划任务 XML 备份(机器特定)
+backups/
