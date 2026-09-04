@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 
 import yaml
@@ -55,16 +56,54 @@ class NotifyConfig:
 
 @dataclass
 class MysqlConfig:
-    """MySQL 镜像库:每轮抓取结束把 SQLite 全量同步过去(SQLite 仍是主库)。"""
+    """MySQL 镜像库:每轮抓取结束把 SQLite 全量同步过去(SQLite 仍是主库)。
+
+    连接参数(host/port/user/password/database)不走配置文件,从环境变量
+    读取:系统环境变量优先,其次项目根 .env(已 gitignore,凭据不入库)。
+    settings.yaml 的 mysql: 节只放行为开关与表名。
+    """
 
     enabled: bool = False
     host: str = "localhost"
     port: int = 3306
     user: str = "root"
-    password: str = ""          # 本机开发库凭据,settings.yaml 勿外传
+    password: str = ""
     database: str = "wechat_crawler"
     table_accounts: str = "wechat_crawler_accounts"
     table_articles: str = "wechat_crawler_articles"
+
+
+MYSQL_ENV_KEYS = {
+    "host": "MYSQL_HOST",
+    "port": "MYSQL_PORT",
+    "user": "MYSQL_USER",
+    "password": "MYSQL_PASSWORD",
+    "database": "MYSQL_DATABASE",
+}
+
+
+def load_env_file(path=PROJECT_ROOT / ".env") -> dict[str, str]:
+    """极简 .env 解析:KEY=VALUE 行,# 注释行与空行忽略,值可带引号。
+
+    不引依赖(不再加 python-dotenv);文件不存在返回 {}(纯系统环境变量
+    也能用)。重复键以后者为准。
+    """
+    out: dict[str, str] = {}
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        if key:
+            out[key] = val
+    return out
 
 
 def _require(d: dict, key: str, where: str):
@@ -105,17 +144,28 @@ def _parse_notify(n) -> NotifyConfig:
     )
 
 
-def _parse_mysql(m) -> MysqlConfig:
+def _parse_mysql(m, env: dict[str, str] | None = None) -> MysqlConfig:
+    """mysql: 节(enabled/表名)+ 环境变量(连接参数)→ MysqlConfig。
+
+    连接参数查找顺序:系统环境变量 > .env 文件 > 内置默认。
+    """
     if m is not None and not isinstance(m, dict):
         raise ConfigError("settings.mysql 必须是键值映射")
     m = m or {}
+    env = dict(env or {})
+    env.update({k: v for k, v in os.environ.items()
+                if k in MYSQL_ENV_KEYS.values() and v != ""})
+
+    def env_val(field: str) -> str:
+        return env.get(MYSQL_ENV_KEYS[field], "").strip()
+
     return MysqlConfig(
         enabled=_parse_bool(m.get("enabled", False), "mysql.enabled"),
-        host=str(m.get("host") or "localhost").strip(),
-        port=int(m.get("port") or 3306),
-        user=str(m.get("user") or "root").strip(),
-        password=str(m.get("password") or ""),
-        database=str(m.get("database") or "wechat_crawler").strip(),
+        host=env_val("host") or "localhost",
+        port=int(env_val("port") or 3306),
+        user=env_val("user") or "root",
+        password=env_val("password"),
+        database=env_val("database") or "wechat_crawler",
         table_accounts=str(m.get("table_accounts")
                            or "wechat_crawler_accounts").strip(),
         table_articles=str(m.get("table_articles")
@@ -177,5 +227,5 @@ def load_config(settings_path=DEFAULT_SETTINGS,
     cfg.notify = _parse_notify(s.get("notify"))
     if cfg.notify.enabled and not cfg.notify.webhook:
         raise ConfigError("notify.enabled=true 但 notify.webhook 为空")
-    cfg.mysql = _parse_mysql(s.get("mysql"))
+    cfg.mysql = _parse_mysql(s.get("mysql"), load_env_file())
     return cfg

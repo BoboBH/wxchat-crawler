@@ -6,14 +6,20 @@ import sqlite3
 import pytest
 
 from src import mysql_sync, orchestrator
-from src.config import MysqlConfig, _parse_mysql
+from src.config import MysqlConfig, _parse_mysql, load_env_file
 from src.db import SCHEMA
 
 
-# ------------------------------------------------ 配置解析
+# ------------------------------------------------ 配置解析(.env / 环境变量)
 
-def test_parse_mysql_defaults_disabled():
-    cfg = _parse_mysql(None)
+ENV = {"MYSQL_HOST": "127.0.0.1", "MYSQL_PORT": "3307", "MYSQL_USER": "u",
+       "MYSQL_PASSWORD": "p", "MYSQL_DATABASE": "db1"}
+
+
+def test_parse_mysql_defaults_disabled(monkeypatch):
+    for k in ENV:
+        monkeypatch.delenv(k, raising=False)
+    cfg = _parse_mysql(None, env={})
     assert cfg.enabled is False
     assert cfg.host == "localhost" and cfg.port == 3306
     assert cfg.user == "root" and cfg.password == ""
@@ -22,20 +28,52 @@ def test_parse_mysql_defaults_disabled():
     assert cfg.table_articles == "wechat_crawler_articles"
 
 
-def test_parse_mysql_full_section():
-    cfg = _parse_mysql({
-        "enabled": True, "host": "127.0.0.1", "port": 3307,
-        "user": "u", "password": "p", "database": "db1",
-        "table_accounts": "ta", "table_articles": "ti",
-    })
-    assert cfg.enabled and cfg.host == "127.0.0.1" and cfg.port == 3307
+def test_parse_mysql_connection_from_env(monkeypatch):
+    for k in ENV:                       # 系统环境变量干净,只看注入的 .env 字典
+        monkeypatch.delenv(k, raising=False)
+    cfg = _parse_mysql({"enabled": True,
+                        "table_accounts": "ta", "table_articles": "ti"}, env=ENV)
+    assert cfg.enabled
+    assert cfg.host == "127.0.0.1" and cfg.port == 3307
     assert (cfg.user, cfg.password, cfg.database) == ("u", "p", "db1")
     assert (cfg.table_accounts, cfg.table_articles) == ("ta", "ti")
+
+
+def test_parse_mysql_os_env_overrides_file(monkeypatch):
+    for k in ENV:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("MYSQL_HOST", "from-os")   # 系统环境变量优先于 .env
+    cfg = _parse_mysql({}, env=dict(ENV))
+    assert cfg.host == "from-os"
+    assert cfg.port == 3307 and cfg.database == "db1"  # 其余仍取 .env
 
 
 def test_parse_mysql_rejects_non_mapping():
     with pytest.raises(Exception):
         _parse_mysql("localhost")
+
+
+# ------------------------------------------------ .env 文件解析
+
+def test_load_env_file_parses_quotes_and_comments(tmp_path):
+    p = tmp_path / ".env"
+    lines = [
+        "# 注释行",
+        "",
+        "MYSQL_HOST=localhost",
+        'MYSQL_PASSWORD="123456"',
+        "MYSQL_PORT=3307",
+        "BAD_LINE_NO_EQUALS",
+        "",
+    ]
+    p.write_text("\n".join(lines), encoding="utf-8")
+    env = load_env_file(p)
+    assert env == {"MYSQL_HOST": "localhost", "MYSQL_PASSWORD": "123456",
+                   "MYSQL_PORT": "3307"}      # 无值的坏行被跳过
+
+
+def test_load_env_file_missing_returns_empty(tmp_path):
+    assert load_env_file(tmp_path / "nope.env") == {}
 
 
 # ------------------------------------------------ _connect 建库建表 DDL
