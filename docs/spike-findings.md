@@ -446,3 +446,33 @@ URL 的控件 Name 就是文章标题);候选为 0、≥2、或归属存疑时�
 标题校验不过(-2)不复制直接弃。菜单依赖解锁桌面(合成 Click),锁屏轮次多候选
 文章留 pending 下轮补全。剪贴板先存后还在 `finally` 恢复;菜单不可达时按
 `(None, 0)` pending,不猜链。
+
+---
+
+# 可行性尖峰E —— 文章页右键菜单「复制链接」排查 +「···」菜单定性(2026-09-04)
+
+- **环境**: Windows 11 / 微信 4.1.12.55(已登录,桌面解锁)/ uiautomation 2.0.29(venv)
+- **背景**: 用户截图的文章页菜单含「复制链接」,问能否用它拿文章短链。
+  产物 `tools/spike_ctx_menu.py`(窗口清单/标题与元信息控件定位/全区域右键扫描/
+  a11y 基线 diff)。
+- **Gate E 结论:右键路线不存在;用户截图实为「···」按钮左键菜单** ——
+  「用复制链接拿短链」由既有 `copy_link_via_menu`(尖峰D)本就已实现,
+  当轮实机复验返回短链且 canonical 收下,不新增代码。
+
+## 实测要点
+
+| 项 | 实测值 |
+| --- | --- |
+| 「···」菜单 | 浏览器工具条 `ButtonControl class='AppMenuButton' Name='更多'` **左键**弹出;16 项全部 `FlueMenuItemView`:关闭全部标签页 Ctrl+Shift+W / 下载内容 / 浏览记录(H) / 用默认浏览器打开 / 星标 / 收藏 Ctrl+D / 分享到朋友圈 / 转发… / 投诉 / 打印 Ctrl+P / 查找(F)… Ctrl+F / 听全文 / 全文翻译 / 调整文字大小(Z) / 复制链接 / 刷新 Ctrl+R。用户截图只是裁掉了顶部几项 |
+| 右键(文本/空白区) | Chromium 级简易菜单(`MenuItemView`:取消翻译/全文翻译/打印/重新加载/前进/返回/问小微),**无复制链接** |
+| 右键(配图) | 页内 HTML 菜单(`context-menu__item context-menu__item-unified`:保存图片/转发/复制),也无复制链接 |
+| 复验 | `copy_link_via_menu` 当轮返回 `https://mp.weixin.qq.com/s/NJXb0U5fQ2k20e-jZiRSJQ`,canonical 直接收下(`/s/<token>` 形态,与尖峰D 一致) |
+
+## 排查定律(复用必读)
+
+1. a11y 树跨右键**保留**已实现的菜单节点 —— 判断「哪个菜单是新弹的」
+   必须先取基线再做 diff,否则旧菜单项会污染判定;
+2. 右键与「···」菜单都是合成鼠标动作:先 ALT 技巧(`keybd_event(0x12)` down/up)
+   + `SetForegroundWindow` 重试抢前台,抢不到**绝不点击**;
+3. 「···」菜单里的「关闭全部标签页 Ctrl+Shift+W」慎用(会连搜一搜基础页签一起关)。
+
