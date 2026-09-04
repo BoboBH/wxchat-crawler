@@ -239,6 +239,11 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
         cutoff = (date.fromisoformat(watermark) -
                   timedelta(days=cfg.overlap_days)).isoformat()
 
+    # 打开主页前先收掉上次崩溃/强杀遗留的页签(2026-09-04 需求「抓完即关」):
+    # 同账号旧主页 tab 不清,find_profile_host 可能命中旧 tab(列表永不刷新,
+    # 水位线被冻结);残留文章 tab 会让首篇提取触发残留防护甚至整篇 pending。
+    bot.close_article_tabs(max_close=3, wait=cfg.close_tab_wait_sec)
+    bot.close_profile_tab(name, wait=cfg.close_tab_wait_sec)
     # 打开主页带失败早退,手动计时(失败打「失败 用时」而非「完成」)
     t_prof = time.perf_counter()
     log.info("[%s] 搜索并打开主页 …", name)
@@ -388,7 +393,8 @@ def _attempt_account(store: Store, cfg: CrawlConfig, name: str,
             log.exception("账号 %s 处理异常", name)
             st = {"ok": False, "new": 0, "upgraded": 0, "pending": 0,
                   "message": "异常(见日志)"}
-            try:  # 异常轮也要尽力收掉半开的主页 tab,防 tab 堆积
+            try:  # 异常轮也要尽力收掉半开的页签,防 tab 堆积(文章+主页都收)
+                bot.close_article_tabs(max_close=2, wait=cfg.close_tab_wait_sec)
                 bot.close_profile_tab(name, wait=cfg.close_tab_wait_sec)
             except Exception:
                 pass
@@ -504,6 +510,13 @@ def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
                             name, attempts - 1)
                 _notify_failure(cfg, name, st["message"], attempts, log)
     finally:
+        try:  # 轮末兜底清扫(2026-09-04 需求):任何退出路径都把残留文章页签收掉
+            if bot.close_article_tabs(max_close=3, wait=cfg.close_tab_wait_sec):
+                log.info("[轮末] 页签清扫完成,无残留文章页")
+            else:
+                log.warning("[轮末] 仍有残留文章页签(不影响数据)")
+        except Exception:
+            log.exception("[轮末] 页签清扫异常(不影响数据)")
         store.finish_run(run_id, ok_count=ok_n, fail_count=fail_n, new_count=new_n)
         sync_mysql(cfg, store.conn, log)  # MySQL 镜像;store 关闭前读 SQLite
         store.close()

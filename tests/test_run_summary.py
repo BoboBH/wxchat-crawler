@@ -67,6 +67,9 @@ def env(monkeypatch):
     monkeypatch.setattr(orchestrator.random, "shuffle", lambda x: None)
     monkeypatch.setattr(orchestrator.time, "sleep", lambda s: sleeps.append(s))
     monkeypatch.setattr(orchestrator.notify_mod, "send_markdown", md)
+    # run() 轮末页签清扫(2026-09-04)会调 bot,桩掉防触真实 UIA
+    monkeypatch.setattr(orchestrator.bot, "close_article_tabs",
+                        lambda **kw: True)
     return store, sleeps, md
 
 
