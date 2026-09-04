@@ -24,6 +24,8 @@ URL、标题、发布时间,存入本地 SQLite,并镜像到 MySQL。(定时任�
 ```powershell
 D:\Python312\python.exe -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item config\settings.example.yaml config\settings.yaml   # 再填钉钉 webhook
+Copy-Item .env.example .env                                    # 再填 MySQL 密码
 .venv\Scripts\python.exe -m pytest tests\ -v   # 单测应全绿
 ```
 
@@ -51,11 +53,12 @@ D:\Python312\python.exe -m venv .venv
 - `config/accounts.yaml` — 公众号名单,`accounts:` 键下每行一个 `- 名称`。
 - `config/settings.yaml` — 停止条数、重叠天数、深滚屏数上限、失败重试
   (`fail_retry`/`fail_retry_wait_sec`)、账号间隔、超时、MySQL 开关、
-  钉钉推送等。
+  钉钉推送等。**含钉钉 webhook 凭据,已 gitignore 不入库**;首次部署从
+  `config/settings.example.yaml` 复制。
 - `.env`(gitignore)— MySQL 连接参数,配置项名 `WXCHAT_CRAWLER_HOST /
   WXCHAT_CRAWLER_PORT / WXCHAT_CRAWLER_USER / WXCHAT_CRAWLER_PASSWORD /
   WXCHAT_CRAWLER_DATABASE`(优先级:系统环境变量 > .env > 内置默认;
-  用带项目前缀的名字,避免与其他项目撞名)。
+  用带项目前缀的名字,避免与其他项目撞名)。模板见 `.env.example`。
 
 ## 钉钉推送
 

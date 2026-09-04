@@ -11,8 +11,11 @@ data/spike_*
 data/spike3c_*
 tools/__pycache__/
 
-# MySQL 凭据(不入库)
+# MySQL 凭据(不入库;模板见 .env.example)
 .env
+
+# 钉钉 webhook 凭据(不入库;模板见 config/settings.example.yaml)
+config/settings.yaml
 
 # 计划任务 XML 备份(机器特定)
 backups/

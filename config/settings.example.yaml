@@ -1,0 +1,57 @@
+# 本文件是配置模板:复制为 config/settings.yaml 后填写(settings.yaml 含
+# 钉钉 webhook 凭据,已 gitignore 不入库)。各项说明与默认值以此为准。
+
+# 微信环境
+wechat:
+  process_name: Weixin.exe          # 主进程名(4.x)
+  exe_path: C:\Program Files\Tencent\Weixin\Weixin.exe
+  expected_version_prefix: "4.1"    # 大版本变化时需用 tools/spike_uia.py 重新校准控件常量
+
+# 抓取节奏与增量
+crawl:
+  stop_streak: 30          # 连续 N 篇发布日早于截止日 → 停止扫描该账号
+  overlap_days: 10         # 截止日 = 水位线 - overlap_days(防漏重叠)
+  new_account_screens: 2   # 无水位线的新账号滚动屏数
+  deep_scroll_screens: 40  # 老账号回填:最旧可见日期未早于截止日就继续下滚的屏数上限(0=关闭,只读首屏)
+  scroll_wait_sec: 2.0     # 每轮滚动后等待列表加载
+  account_gap_min_sec: 20  # 账号间随机间隔下限(秒)
+  account_gap_max_sec: 60  # 账号间随机间隔上限(秒)
+  fail_retry: 3            # 账号失败后的重试次数(0=不重试;失败即刻@钉钉)
+  fail_retry_wait_sec: 10  # 重试前暂停秒数
+
+# 文章 URL 提取
+article:
+  open_timeout_sec: 40     # 打开文章页等待上限
+  url_scan_timeout_sec: 20
+  max_tree_nodes: 5000     # UIA 树遍历节点上限
+  close_tab_wait_sec: 2.5
+  kick_retry: 2            # 树未 realization 时 kick 重试次数
+
+# 运行
+run:
+  # 相对路径以进程工作目录为基准(手动运行请在仓库根目录执行)
+  db_path: data/crawler.db
+  log_dir: logs
+
+# MySQL 镜像库(每轮结束把 SQLite 全量同步过去,幂等可重放;SQLite 仍是主库)
+# 连接参数(host/port/user/password/database)不放这里 —— 在项目根 .env
+# (gitignore,凭据不入库),系统环境变量优先于 .env;库/表自动创建
+mysql:
+  enabled: true
+  table_accounts: wechat_crawler_accounts
+  table_articles: wechat_crawler_articles
+
+# 钉钉推送(逐篇即推:每抓到一篇新文章 URL 立即发一条,不聚合)
+notify:
+  enabled: false
+  # webhook 含 access_token 凭据,只填在本机 settings.yaml(已 gitignore),勿外传
+  webhook: ""       # 形如 https://oapi.dingtalk.com/robot/send?access_token=xxx
+  secret: ""        # 机器人安全设置选「加签」时填 SEC 开头密钥;选关键词/IP白名单则留空
+  # 机器人安全设置=自定义关键词「wxcrawler」:代码会把所有消息标题统一加
+  # 「wxcrawler:」前缀保证过检(notify.py 的 MESSAGE_PREFIX);
+  # 这里的 keyword 只用于标题追加【关键词】样式,保持空串即可
+  keyword: ""
+  at_robot_name: "" # 要@的应用机器人「群昵称」(写入正文 @文本,兜底)
+  at_user_ids: []   # 要@的 userId 列表(应用机器人的 userId 填这里,真@)
+  at_mobiles: []    # 要@的人的手机号列表(真@提醒)
+  at_all: false     # @所有人(每篇一条,慎开)

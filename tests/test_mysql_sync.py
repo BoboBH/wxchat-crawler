@@ -62,7 +62,7 @@ def test_load_env_file_parses_quotes_and_comments(tmp_path):
         "# 注释行",
         "",
         "WXCHAT_CRAWLER_HOST=localhost",
-        'WXCHAT_CRAWLER_PASSWORD="123456"',
+        'WXCHAT_CRAWLER_PASSWORD="s3cret-pw"',
         "WXCHAT_CRAWLER_PORT=3307",
         "BAD_LINE_NO_EQUALS",
         "",
@@ -70,7 +70,7 @@ def test_load_env_file_parses_quotes_and_comments(tmp_path):
     p.write_text("\n".join(lines), encoding="utf-8")
     env = load_env_file(p)
     assert env == {"WXCHAT_CRAWLER_HOST": "localhost",
-                   "WXCHAT_CRAWLER_PASSWORD": "123456",
+                   "WXCHAT_CRAWLER_PASSWORD": "s3cret-pw",
                    "WXCHAT_CRAWLER_PORT": "3307"}  # 无值的坏行被跳过
 
 
