@@ -9,6 +9,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 控制台 GBK 环境下打印中文标题(可能含 \\xa0 等)会崩,统一 UTF-8 输出
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 import pymysql
 
 from src.config import load_config
