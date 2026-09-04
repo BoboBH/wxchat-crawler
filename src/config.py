@@ -75,12 +75,14 @@ class MysqlConfig:
     table_articles: str = "wechat_crawler_articles"
 
 
-MYSQL_ENV_KEYS = {
-    "host": "MYSQL_HOST",
-    "port": "MYSQL_PORT",
-    "user": "MYSQL_USER",
-    "password": "MYSQL_PASSWORD",
-    "database": "MYSQL_DATABASE",
+# 环境变量名带项目前缀(2026-09-04 用户要求):MYSQL_* 区分度太低,容易与
+# 本机其他项目的环境变量撞名;统一用 WXCHAT_CRAWLER_ 前缀。
+WXCHAT_CRAWLER_ENV_KEYS = {
+    "host": "WXCHAT_CRAWLER_HOST",
+    "port": "WXCHAT_CRAWLER_PORT",
+    "user": "WXCHAT_CRAWLER_USER",
+    "password": "WXCHAT_CRAWLER_PASSWORD",
+    "database": "WXCHAT_CRAWLER_DATABASE",
 }
 
 
@@ -156,10 +158,10 @@ def _parse_mysql(m, env: dict[str, str] | None = None) -> MysqlConfig:
     m = m or {}
     env = dict(env or {})
     env.update({k: v for k, v in os.environ.items()
-                if k in MYSQL_ENV_KEYS.values() and v != ""})
+                if k in WXCHAT_CRAWLER_ENV_KEYS.values() and v != ""})
 
     def env_val(field: str) -> str:
-        return env.get(MYSQL_ENV_KEYS[field], "").strip()
+        return env.get(WXCHAT_CRAWLER_ENV_KEYS[field], "").strip()
 
     return MysqlConfig(
         enabled=_parse_bool(m.get("enabled", False), "mysql.enabled"),

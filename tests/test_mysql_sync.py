@@ -12,8 +12,9 @@ from src.db import SCHEMA
 
 # ------------------------------------------------ 配置解析(.env / 环境变量)
 
-ENV = {"MYSQL_HOST": "127.0.0.1", "MYSQL_PORT": "3307", "MYSQL_USER": "u",
-       "MYSQL_PASSWORD": "p", "MYSQL_DATABASE": "db1"}
+ENV = {"WXCHAT_CRAWLER_HOST": "127.0.0.1", "WXCHAT_CRAWLER_PORT": "3307",
+       "WXCHAT_CRAWLER_USER": "u", "WXCHAT_CRAWLER_PASSWORD": "p",
+       "WXCHAT_CRAWLER_DATABASE": "db1"}
 
 
 def test_parse_mysql_defaults_disabled(monkeypatch):
@@ -42,7 +43,7 @@ def test_parse_mysql_connection_from_env(monkeypatch):
 def test_parse_mysql_os_env_overrides_file(monkeypatch):
     for k in ENV:
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("MYSQL_HOST", "from-os")   # 系统环境变量优先于 .env
+    monkeypatch.setenv("WXCHAT_CRAWLER_HOST", "from-os")  # 系统环境变量优先于 .env
     cfg = _parse_mysql({}, env=dict(ENV))
     assert cfg.host == "from-os"
     assert cfg.port == 3307 and cfg.database == "db1"  # 其余仍取 .env
@@ -60,16 +61,17 @@ def test_load_env_file_parses_quotes_and_comments(tmp_path):
     lines = [
         "# 注释行",
         "",
-        "MYSQL_HOST=localhost",
-        'MYSQL_PASSWORD="123456"',
-        "MYSQL_PORT=3307",
+        "WXCHAT_CRAWLER_HOST=localhost",
+        'WXCHAT_CRAWLER_PASSWORD="123456"',
+        "WXCHAT_CRAWLER_PORT=3307",
         "BAD_LINE_NO_EQUALS",
         "",
     ]
     p.write_text("\n".join(lines), encoding="utf-8")
     env = load_env_file(p)
-    assert env == {"MYSQL_HOST": "localhost", "MYSQL_PASSWORD": "123456",
-                   "MYSQL_PORT": "3307"}      # 无值的坏行被跳过
+    assert env == {"WXCHAT_CRAWLER_HOST": "localhost",
+                   "WXCHAT_CRAWLER_PASSWORD": "123456",
+                   "WXCHAT_CRAWLER_PORT": "3307"}  # 无值的坏行被跳过
 
 
 def test_load_env_file_missing_returns_empty(tmp_path):
