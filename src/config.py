@@ -35,6 +35,8 @@ class CrawlConfig:
     kick_retry: int
     db_path: Path
     log_dir: Path
+    fail_retry: int = 3          # 账号失败后的重试次数(0=不重试)
+    fail_retry_wait_sec: float = 10.0  # 重试前暂停秒数
     accounts: list[str] = field(default_factory=list)
     notify: "NotifyConfig" = field(default_factory=lambda: NotifyConfig())
     mysql: "MysqlConfig" = field(default_factory=lambda: MysqlConfig())
@@ -224,6 +226,13 @@ def load_config(settings_path=DEFAULT_SETTINGS,
         raise ConfigError("crawl.deep_scroll_screens 不能为负")
     if cfg.account_gap_min_sec > cfg.account_gap_max_sec:
         raise ConfigError("crawl.account_gap_min_sec 不能大于 account_gap_max_sec")
+    cfg.fail_retry = int(crawl.get("fail_retry", cfg.fail_retry))
+    if cfg.fail_retry < 0:
+        raise ConfigError("crawl.fail_retry 不能为负")
+    cfg.fail_retry_wait_sec = float(
+        crawl.get("fail_retry_wait_sec", cfg.fail_retry_wait_sec))
+    if cfg.fail_retry_wait_sec < 0:
+        raise ConfigError("crawl.fail_retry_wait_sec 不能为负")
     cfg.notify = _parse_notify(s.get("notify"))
     if cfg.notify.enabled and not cfg.notify.webhook:
         raise ConfigError("notify.enabled=true 但 notify.webhook 为空")

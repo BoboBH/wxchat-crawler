@@ -109,11 +109,62 @@ def send_article(notify: NotifyConfig, article: dict, post=None,
         return False, "缺少 webhook"
     if not article.get("url"):
         return False, "无URL不发送"
-    post = post or _default_post
-    _throttle(sleep)
-    url = sign_webhook(notify.webhook, notify.secret)
     payload = build_payload(article, notify.keyword, notify.at_robot_name,
                             notify.at_mobiles, notify.at_user_ids, notify.at_all)
+    return _send_with_retry(notify, payload, post or _default_post, sleep, log)
+
+
+def build_notice_payload(title: str, text: str, keyword: str = "",
+                         at_robot_name: str = "",
+                         at_mobiles: list[str] | None = None,
+                         at_user_ids: list[str] | None = None,
+                         at_all: bool = False) -> dict:
+    """通告类 markdown 消息(账号失败告警/轮末总结)的 payload。
+
+    text 为正文(markdown);@ 规则与单篇推送一致:手机号须同时写进正文。
+    """
+    at_mobiles = [str(m) for m in (at_mobiles or [])]
+    at_user_ids = [str(u) for u in (at_user_ids or [])]
+    kw = f"【{keyword.strip()}】" if keyword.strip() else ""
+    full = text
+    mentions = [x for x in [f"@{at_robot_name}" if at_robot_name else "",
+                            *(f"@{m}" for m in at_mobiles)] if x]
+    if mentions:
+        full = text + "\n" + " ".join(mentions)
+    return {
+        "msgtype": "markdown",
+        "markdown": {"title": f"{title}{kw}", "text": full},
+        "at": {"atMobiles": at_mobiles, "atUserIds": at_user_ids,
+               "isAtAll": at_all},
+    }
+
+
+def send_markdown(notify: NotifyConfig, title: str, text: str,
+                  mention: bool = True, post=None, sleep=time.sleep,
+                  log=None) -> tuple[bool, str]:
+    """发送一条通告类 markdown(title=通知列表标题,text=正文)。
+
+    mention=False 时不带任何 @(轮末总结等信息性消息);失败告警默认带 @。
+    与逐篇推送共用限流/加签/重试;绝不抛异常。
+    """
+    if not notify.enabled:
+        return False, "通知未启用"
+    if not notify.webhook:
+        return False, "缺少 webhook"
+    payload = build_notice_payload(
+        title, text, notify.keyword,
+        notify.at_robot_name if mention else "",
+        notify.at_mobiles if mention else None,
+        notify.at_user_ids if mention else None,
+        notify.at_all if mention else False)
+    return _send_with_retry(notify, payload, post or _default_post, sleep, log)
+
+
+def _send_with_retry(notify: NotifyConfig, payload: dict, post, sleep,
+                     log=None) -> tuple[bool, str]:
+    """加签 + 限流 + 首次/2 次重试的发送通道;结果 (是否成功, 原因)。"""
+    _throttle(sleep)
+    url = sign_webhook(notify.webhook, notify.secret)
     last = ""
     for attempt in range(RETRIES + 1):
         try:

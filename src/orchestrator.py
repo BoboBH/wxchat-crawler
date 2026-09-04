@@ -366,6 +366,103 @@ def sync_mysql(cfg: CrawlConfig, conn, log: logging.Logger) -> None:
         log.exception("[MySQL] 同步失败(SQLite 不受影响,下轮自动补齐)")
 
 
+def _attempt_account(store: Store, cfg: CrawlConfig, name: str,
+                     log: logging.Logger, position: str | None,
+                     push) -> tuple[dict, int]:
+    """处理一个账号,失败按 cfg.fail_retry 重试(每次重试前暂停
+    fail_retry_wait_sec 秒);返回 (最终状态, 实际尝试次数)。
+
+    重试窗口内成功即止;逐次失败打「第N次尝试失败」行,让时间线可追。
+    异常与失败同等待遇(异常轮也尽力收掉半开的主页 tab,防 tab 堆积)。
+    """
+    t0 = time.perf_counter()
+    st: dict = {"ok": False, "new": 0, "upgraded": 0, "pending": 0,
+                "message": "未执行"}
+    attempts = 0
+    for attempt in range(cfg.fail_retry + 1):
+        attempts += 1
+        try:
+            st = process_account(store, cfg, name, log,
+                                 position=position, push=push)
+        except Exception:
+            log.exception("账号 %s 处理异常", name)
+            st = {"ok": False, "new": 0, "upgraded": 0, "pending": 0,
+                  "message": "异常(见日志)"}
+            try:  # 异常轮也要尽力收掉半开的主页 tab,防 tab 堆积
+                bot.close_profile_tab(name, wait=cfg.close_tab_wait_sec)
+            except Exception:
+                pass
+        if st["ok"]:
+            tail = f",第{attempts}次尝试成功" if attempts > 1 else ""
+            log.info("账号 %s: %s(用时%s%s)", name, st["message"],
+                     fmt_duration(time.perf_counter() - t0), tail)
+            return st, attempts
+        if attempt < cfg.fail_retry:
+            log.info("[账号 %s] 第%d次尝试失败: %s → 停 %.0fs 后重试",
+                     name, attempts, st["message"], cfg.fail_retry_wait_sec)
+            time.sleep(cfg.fail_retry_wait_sec)
+    return st, attempts
+
+
+def _failure_alert_text(name: str, reason: str, attempts: int) -> str:
+    """账号最终失败(重试耗尽)的钉钉告警正文。"""
+    return "\n".join([
+        "### 公众号抓取失败",
+        f"- 账号: **{name}**",
+        f"- 原因: {reason}",
+        f"- 共尝试 {attempts} 次(含重试 {attempts - 1} 次)仍失败,本轮放弃;"
+        "下一轮计划任务会自动重抓",
+    ])
+
+
+def _run_summary_text(ok_names: list[str], failed: list[tuple[str, str]],
+                      new_n: int, total: int) -> str:
+    """轮末总结正文:成功数/列表、新增篇数、失败数/名单/原因。"""
+    lines = [
+        "### 本轮抓取总结",
+        f"- 成功账号: **{len(ok_names)}/{total}** 个",
+        f"- 新增文章: **{new_n}** 篇",
+        f"- 失败账号: **{len(failed)}** 个",
+    ]
+    for n, r in failed:
+        lines.append(f"- 失败: {n} —— {r}")
+    if ok_names:
+        lines.append("\n成功列表: " + "、".join(ok_names))
+    return "\n".join(lines)
+
+
+def _notify_failure(cfg: CrawlConfig, name: str, reason: str,
+                    attempts: int, log: logging.Logger) -> None:
+    """账号最终失败即刻推送钉钉(带 @);失败不影响主流程。"""
+    ok, msg = notify_mod.send_markdown(
+        cfg.notify, f"抓取失败: {name}",
+        _failure_alert_text(name, reason, attempts), mention=True, log=log)
+    if ok:
+        log.info("[钉钉] 失败告警已推送: %s", name)
+    else:
+        log.warning("[钉钉] 失败告警推送失败(%s): %s", msg, name)
+
+
+def _notify_summary(cfg: CrawlConfig, ok_names: list[str],
+                    failed: list[tuple[str, str]], new_n: int, total: int,
+                    log: logging.Logger) -> None:
+    """轮末总结:打日志 + 推钉钉(信息性消息,不带 @)。"""
+    log.info("本轮总结: 成功%d/%d 新增%d篇 失败%d",
+             len(ok_names), total, new_n, len(failed))
+    if ok_names:
+        log.info("  成功列表: %s", "、".join(ok_names))
+    for n, r in failed:
+        log.info("  失败: %s —— %s", n, r)
+    ok, msg = notify_mod.send_markdown(
+        cfg.notify, "本轮抓取总结",
+        _run_summary_text(ok_names, failed, new_n, total),
+        mention=False, log=log)
+    if ok:
+        log.info("[钉钉] 轮末总结已推送")
+    else:
+        log.warning("[钉钉] 轮末总结推送失败(%s)", msg)
+
+
 def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
     log = setup_logging(cfg.log_dir)
     t_run = time.perf_counter()
@@ -384,6 +481,8 @@ def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
     run_id = store.start_run()
     push = _make_pusher(cfg.notify, log)  # 未启用→None;推送不影响抓取主流程
     ok_n = fail_n = new_n = 0
+    ok_names: list[str] = []
+    failed: list[tuple[str, str]] = []
     try:
         for i, name in enumerate(names):
             if i:
@@ -391,27 +490,24 @@ def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
                 log.info("等待 %.1fs 后处理下一账号(防风控)", gap)  # 先说明再睡,时间线不断档
                 time.sleep(gap)
             log.info("=== 账号[%d/%d] %s ===", i + 1, len(names), name)
-            t_acc = time.perf_counter()
-            try:
-                st = process_account(store, cfg, name, log,
-                                     position=f"{i + 1}/{len(names)}", push=push)
-            except Exception:
-                log.exception("账号 %s 处理异常", name)
-                st = {"ok": False, "new": 0, "upgraded": 0, "pending": 0,
-                      "message": "异常(见日志)"}
-                try:  # 异常轮也要尽力收掉半开的主页 tab,防 tab 堆积
-                    bot.close_profile_tab(name, wait=cfg.close_tab_wait_sec)
-                except Exception:
-                    pass
+            st, attempts = _attempt_account(store, cfg, name, log,
+                                            position=f"{i + 1}/{len(names)}",
+                                            push=push)
             ok_n += 1 if st["ok"] else 0
             fail_n += 0 if st["ok"] else 1
             new_n += st["new"]
-            log.info("账号 %s: %s(用时%s)", name, st["message"],
-                     fmt_duration(time.perf_counter() - t_acc))
+            if st["ok"]:
+                ok_names.append(name)
+            else:
+                failed.append((name, st["message"]))
+                log.warning("[账号 %s] 重试%d次后仍失败,本轮放弃",
+                            name, attempts - 1)
+                _notify_failure(cfg, name, st["message"], attempts, log)
     finally:
         store.finish_run(run_id, ok_count=ok_n, fail_count=fail_n, new_count=new_n)
         sync_mysql(cfg, store.conn, log)  # MySQL 镜像;store 关闭前读 SQLite
         store.close()
     log.info("本轮完成: 成功%d 失败%d 新增%d(总耗时%s)", ok_n, fail_n, new_n,
              fmt_duration(time.perf_counter() - t_run))
+    _notify_summary(cfg, ok_names, failed, new_n, len(names), log)
     return 0 if fail_n == 0 else 1

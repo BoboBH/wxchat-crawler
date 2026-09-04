@@ -343,7 +343,10 @@ def test_run_pushes_per_article_when_enabled(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, _notify())
     _seed_watermark(cfg)
     assert orchestrator.run(cfg) == 0
-    assert len(poster.calls) == 1              # run 内部自建 pusher 并逐篇推
+    # 文章逐篇 1 条 + 轮末总结 1 条(2026-09-04 新增轮级统计)
+    assert len(poster.calls) == 2
+    assert poster.calls[0][1]["markdown"]["title"].startswith("新文章")
+    assert poster.calls[1][1]["markdown"]["title"].startswith("本轮抓取总结")
 
 
 def test_run_disabled_notify_never_posts(tmp_path, monkeypatch):
@@ -355,3 +358,67 @@ def test_run_disabled_notify_never_posts(tmp_path, monkeypatch):
     _seed_watermark(cfg)
     assert orchestrator.run(cfg) == 0
     assert poster.calls == []
+
+
+# ------------------------------------------------ 通告类消息(告警/总结)
+
+def test_build_notice_payload_mentions_and_keyword():
+    p = notify_mod.build_notice_payload(
+        "抓取失败: 甲", "### 公众号抓取失败\n- 账号: 甲", keyword="爬虫",
+        at_robot_name="值班", at_mobiles=["13800000000"],
+        at_user_ids=["u1"])
+    assert p["msgtype"] == "markdown"
+    assert p["markdown"]["title"] == "抓取失败: 甲【爬虫】"
+    assert "- 账号: 甲" in p["markdown"]["text"]
+    assert p["markdown"]["text"].endswith("@值班 @13800000000")  # 手机号须入正文
+    assert p["at"] == {"atMobiles": ["13800000000"], "atUserIds": ["u1"],
+                       "isAtAll": False}
+
+
+def test_build_notice_payload_no_mentions():
+    p = notify_mod.build_notice_payload("总结", "正文")
+    assert p["markdown"]["text"] == "正文"       # 无 @ 配置时不追加行
+    assert p["at"]["atMobiles"] == [] and p["at"]["atUserIds"] == []
+
+
+def test_send_markdown_ok_and_disabled():
+    poster = _Poster([(200, {"errcode": 0})])
+    ok, msg = notify_mod.send_markdown(_notify(), "标题", "正文",
+                                       post=poster, sleep=_no_sleep)
+    assert ok and msg == "ok" and len(poster.calls) == 1
+    assert poster.calls[0][0].startswith(WEBHOOK)  # 未加签原样
+
+    ok, msg = notify_mod.send_markdown(NotifyConfig(), "标题", "正文",
+                                       post=poster, sleep=_no_sleep)
+    assert not ok and msg == "通知未启用"
+
+
+def test_send_markdown_mention_false_strips_at():
+    poster = _Poster([(200, {"errcode": 0})])
+    n = _notify(at_robot_name="值班", at_user_ids=["u1"],
+                at_mobiles=["13800000000"])
+    ok, _ = notify_mod.send_markdown(n, "本轮抓取总结", "正文",
+                                     mention=False, post=poster, sleep=_no_sleep)
+    assert ok
+    payload = poster.calls[0][1]
+    assert payload["at"]["atUserIds"] == []      # 总结不带 @
+    assert "@" not in payload["markdown"]["text"]
+    ok2, _ = notify_mod.send_markdown(n, "抓取失败", "正文",
+                                      mention=True, post=poster, sleep=_no_sleep)
+    assert poster.calls[1][1]["at"]["atUserIds"] == ["u1"]  # 告警默认带 @
+
+
+def test_send_markdown_retries_then_succeeds():
+    poster = _Poster([Exception("网络抖动"), (200, {"errcode": 0})])
+    sleeps: list[float] = []
+    ok, msg = notify_mod.send_markdown(_notify(), "标题", "正文",
+                                       post=poster, sleep=sleeps.append)
+    assert ok and msg == "ok"
+    assert sleeps == [1.0]  # 第2次成功 → 只吃第1档退避,不再吃后续档
+
+
+def test_send_markdown_never_raises():
+    poster = _Poster([Exception("x")])
+    ok, msg = notify_mod.send_markdown(_notify(), "标题", "正文",
+                                       post=poster, sleep=_no_sleep)
+    assert not ok and "通知异常" in msg
