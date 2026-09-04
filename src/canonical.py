@@ -52,11 +52,18 @@ def canonicalize_url(url: str | None) -> str | None:
 
 
 def make_dedup_key(url: str | None, title: str, date_text: str | None) -> str:
-    """有 canonical URL 用之;否则用 标题|日期 的 sha1 兜底(t| 前缀区分)。"""
+    """有 canonical URL 用之;否则用 标题|归一化日期 的 sha1 兜底(t| 前缀区分)。
+
+    日期先归一化(2026-09-04 实测):同一页顶部文章标「星期三」、滚到深处
+    同批文章标「9月2日」,原始文本做 key 会同文双 key → seen 命不中、
+    重复开文章页,碰撞场景还会插重复 pending 行。归一化 ISO 后同 key;
+    无法归一化时退回原始文本(保持旧行为)。
+    """
     canon = canonicalize_url(url)
     if canon:
         return canon
-    return "t|" + hashlib.sha1(f"{title}|{date_text or ''}".encode("utf-8")).hexdigest()
+    d = normalize_date_text(date_text) or (date_text or "")
+    return "t|" + hashlib.sha1(f"{title}|{d}".encode("utf-8")).hexdigest()
 
 
 def normalize_date_text(text: str | None, today: date | None = None) -> str | None:

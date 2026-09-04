@@ -57,6 +57,13 @@ def test_dedup_key_fallback_deterministic():
     assert make_dedup_key(None, "标题A", None) != make_dedup_key(None, "标题A", "8月23日")
 
 
+def test_dedup_key_date_variants_same_key():
+    """同日不同写法(8月23日 / 2026年8月23日)必须同 key(2026-09-04 实测
+    同页顶部「星期三」深处「9月2日」漂移出重复行的根因)。"""
+    assert (make_dedup_key(None, "标题A", "8月23日")
+            == make_dedup_key(None, "标题A", "2026年8月23日"))
+
+
 def test_normalize_relative(today=date(2026, 9, 3)):
     assert normalize_date_text("今天", today) == "2026-09-03"
     assert normalize_date_text("昨天", today) == "2026-09-02"

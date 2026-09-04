@@ -46,6 +46,8 @@ MORE_BUTTON_NAME = "更多"
 MENU_ITEM_CLASS = "FlueMenuItemView"
 COPY_LINK_NAME = "复制链接"
 CF_UNICODETEXT = 13
+WM_MOUSEWHEEL = 0x020A                # 滚轮消息(_post_wheel 直投窗口队列)
+WHEEL_DELTA = 120                     # Windows 标准滚轮齿距
 
 # 与 orchestrator 同名 logger(诊断日志走同一文件;自愈层只在异常时发声)
 _log = logging.getLogger("crawler")
@@ -341,31 +343,71 @@ def scan_list(host, max_nodes: int = 4000):
     return [t[0] for t in titles], times
 
 
-def scroll_once(host, wheels: int = 10):
-    """在宿主中心滚轮下翻一屏(合成鼠标输入,锁屏下无效;仅新账号扩量用)。"""
+def _wheel_point(host):
+    """WM_MOUSEWHEEL 消息携带的命中点:主页列表区下部(右缘内缩 200、
+    底缘上移 150)。
+
+    2026-09-04 变体矩阵实测:主页是 Chromium 内嵌页,滚轮只认命中点的
+    DOM 容器 —— 页头/列表首行(sticky 日期头一带)不滚,列表下部四种
+    前台状态下全部正常滚动。不再锚定标题控件(滚动恢复/视口外钳制
+    会让标题 rect 不可靠)。
+    """
+    r = host.BoundingRectangle
+    x = max(r.left + 10, min(r.right - 200, r.right - 10))
+    y = max(r.top + 10, min(r.bottom - 150, r.bottom - 60))
+    return int(x), int(y)
+
+
+def _post_wheel(host, notches: int):
+    """向微信主窗消息队列投递 WM_MOUSEWHEEL(notches>0 下滚,<0 上滚)。
+
+    2026-09-04 实测:合成滚轮(SendInput,即 uia.WheelDown)在计划任务/
+    后台进程形态下被系统输入路由丢弃,时灵时不灵;直投消息则稳定生效,
+    但命中窗口有讲究 —— 投 Chromium 子窗(RenderWidgetHostHWND)被忽略,
+    投顶层主窗才被 Chromium 按命中点路由到列表视口(真机验证:
+    投主窗连续滚动 -442→-2692,同坐标投子窗纹丝不动)。故取
+    GA_ROOT 顶层句柄投递。附带收益:不移动用户鼠标、与前台状态无关。
+    锁屏下无效(与合成滚轮一致)。
+    每次投递打一行诊断(句柄/矩形/落点/返回值):该通道失效模式隐蔽,
+    现场数据是唯一可靠的排查依据。
+    """
+    hwnd = host.NativeWindowHandle or 0
+    root = USER32.GetAncestor(hwnd, 2) or hwnd   # 2 = GA_ROOT
+    x, y = _wheel_point(host)
+    lparam = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+    delta = -WHEEL_DELTA if notches > 0 else WHEEL_DELTA
+    wparam = ((delta & 0xFFFF) << 16)          # 低字为按键状态标志(0)
+    rv = 0
+    for _ in range(abs(notches)):
+        rv = USER32.PostMessageW(root, WM_MOUSEWHEEL, wparam, lparam)
+        time.sleep(0.03)
     try:
         r = host.BoundingRectangle
-        USER32.SetCursorPos(
-            int((r.left + r.right) // 2), int(min((r.top + r.bottom) // 2, r.bottom - 60)))
-        time.sleep(0.3)
-        uia.WheelDown(wheels)
+        rect = f"({r.left},{r.top},{r.right},{r.bottom})"
+    except Exception:
+        rect = "?"
+    _log.info("    [滚轮] %+d齿 root=%s host=%s rect=%s 点=(%d,%d) rv=%s",
+              notches, root, hwnd, rect, x, y, rv)
+
+
+def scroll_once(host, wheels: int = 10):
+    """在宿主下翻一屏(投递 WM_MOUSEWHEEL,锁屏下无效;见 _post_wheel)。"""
+    try:
+        _post_wheel(host, wheels)
     except Exception:
         pass
 
 
 def scroll_to_top(host, wheels: int = 30, wait: float = 2.0):
-    """滚轮回到页顶并稍候(合成鼠标输入,锁屏下无效)。
+    """滚回页顶并稍候(投递 WM_MOUSEWHEEL,锁屏下无效;见 _post_wheel)。
 
     主页日期标签是 sticky 头:页面滚动后其 rect 被视口钳制、不再随分组走,
     在滚动状态下扫描会导致日期与标题错位配对(验收实测:同文一次 08-28
-    一次 08-30)。扩量滚动后必须回顶再取最终列表。
+    一次 08-30)。主页打开时的滚动状态不可知 —— 所以每次收采开始
+    也必须先回顶再扫。
     """
     try:
-        r = host.BoundingRectangle
-        USER32.SetCursorPos(
-            int((r.left + r.right) // 2), int(min((r.top + r.bottom) // 2, r.bottom - 60)))
-        time.sleep(0.3)
-        uia.WheelUp(wheels)
+        _post_wheel(host, -wheels)
         time.sleep(wait)
     except Exception:
         pass

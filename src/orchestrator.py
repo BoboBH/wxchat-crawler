@@ -100,7 +100,31 @@ def _covers_cutoff(dates: list[str | None], cutoff: str) -> bool:
     return bool(real) and min(real) <= cutoff
 
 
-def _collect_list(cfg: CrawlConfig, host, cutoff: str | None):
+def _first_top(titles) -> float:
+    """首标题视口 top;空列表返回 0.0。"""
+    return titles[0].BoundingRectangle.top if titles else 0.0
+
+
+def _screen_fingerprint(titles) -> tuple[int, float]:
+    """扫描瞬间的屏幕指纹 (条数, 首标题 top)。
+
+    UIA 控件的 BoundingRectangle 是活查询:滚动后再读旧控件拿到的是
+    滚动后的新位置(2026-09-04 实测:扫描时 828、两屏滚动后重查旧控件
+    变 -1692),把「已滚动」误判成「未移动」→ 假触底。触底判定必须用
+    扫描当时立即快照的 Python 数值,不得延迟重查 UIA rect。
+    """
+    return (len(titles), _first_top(titles))
+
+
+def _same_screen(fp_old: tuple[int, float], fp_new: tuple[int, float]) -> bool:
+    """两屏指纹相同 → 视口没移动(触底)。条数不增或 top 不动都可能是
+    滚半屏(2026-09-04 实测条数常不变),两者须同时不变才算没动。"""
+    return (fp_new[0] == fp_old[0]
+            and abs(fp_new[1] - fp_old[1]) <= 1.5)
+
+
+def _collect_list(cfg: CrawlConfig, host, cutoff: str | None,
+                  log: logging.Logger | None = None):
     """读列表并按需滚动扩量,返回 (title_ctrls, pairs, dates)。
 
     新账号(无水位线):固定滚 new_account_screens 屏(原逻辑)。
@@ -110,33 +134,66 @@ def _collect_list(cfg: CrawlConfig, host, cutoff: str | None):
 
     扩量滚动后必须回页顶重扫:日期标签是 sticky 头,滚动状态下 rect 被视口
     钳制,扫描得到的日期会与标题错位(验收实测),回顶后才是自然排布。
+    主页打开时的滚动状态不可知(首扫 top 是任意屏幕坐标,可能不在页顶),
+    所以每次收采一律先回顶再首扫。
     """
+
+    def dbg(msg, *args):
+        if log:
+            log.info("    [回填] " + msg, *args)
+
+    bot.scroll_to_top(host, wait=cfg.scroll_wait_sec)
     titles, times = bot.scan_list(host, max_nodes=cfg.max_tree_nodes)
+    fp = _screen_fingerprint(titles)
     if cutoff is None:
         for _ in range(cfg.new_account_screens):
             bot.scroll_once(host)
             time.sleep(cfg.scroll_wait_sec)
             t2, s2 = bot.scan_list(host, max_nodes=cfg.max_tree_nodes)
-            if len(t2) == len(titles):
+            fp2 = _screen_fingerprint(t2)
+            if _same_screen(fp, fp2):
                 break
-            titles, times = t2, s2
+            titles, times, fp = t2, s2, fp2
         bot.scroll_to_top(host, wait=cfg.scroll_wait_sec)
         titles, times = bot.scan_list(host, max_nodes=cfg.max_tree_nodes)
     elif cfg.deep_scroll_screens > 0:
         scrolled = False
-        for _ in range(cfg.deep_scroll_screens):
-            if _covers_cutoff(_pairs_and_dates(titles, times)[1], cutoff):
-                break
+        refocus_retried = False
+
+        def _scroll_and_scan():
             bot.scroll_once(host)
             time.sleep(cfg.scroll_wait_sec)
             t2, s2 = bot.scan_list(host, max_nodes=cfg.max_tree_nodes)
-            if len(t2) == len(titles):
+            return t2, s2, _screen_fingerprint(t2)
+
+        for screen in range(1, cfg.deep_scroll_screens + 1):
+            dates_now = _pairs_and_dates(titles, times)[1]
+            real = [d for d in dates_now if d]
+            oldest = min(real) if real else "?"
+            if _covers_cutoff(dates_now, cutoff):
+                dbg("第%d屏前判定: 可见%d条 最旧%s ≤ 截止%s → 已覆盖,停滚",
+                    screen, len(titles), oldest, cutoff)
+                break
+            dbg("第%d屏前判定: 可见%d条 top%.0f 最旧%s > 截止%s → 下滚一屏",
+                screen, len(titles), fp[1], oldest, cutoff)
+            t2, s2, fp2 = _scroll_and_scan()
+            if _same_screen(fp, fp2) and not refocus_retried:
+                # 「未移动」也可能是滚轮通道偶发失效(退前台被抢等),
+                # 重试一屏再判,避免把偶发吞轮当成真触底
+                refocus_retried = True
+                dbg("视口未移动 → 重试一屏")
+                t2, s2, fp2 = _scroll_and_scan()
+            if _same_screen(fp, fp2):
+                dbg("滚动后视口未移动(%d条,top %.0f) → 判触底,停滚",
+                    len(t2), fp2[1])
                 break  # 触底,没有更多可加载
-            titles, times = t2, s2
+            titles, times, fp = t2, s2, fp2
             scrolled = True
+            dbg("滚后可见 %d 条 top%.0f", len(titles), fp[1])
         if scrolled:
             bot.scroll_to_top(host, wait=cfg.scroll_wait_sec)
             titles, times = bot.scan_list(host, max_nodes=cfg.max_tree_nodes)
+            dbg("回顶重扫: %d 条", len(titles))
     pairs, dates = _pairs_and_dates(titles, times)
     return titles, pairs, dates
 
@@ -207,7 +264,7 @@ def process_account(store: Store, cfg: CrawlConfig, name: str,
              fmt_duration(time.perf_counter() - t_prof))
 
     with log_step(log, "[%s] 列表扫描", name) as scanned:
-        title_ctrls, pairs, dates = _collect_list(cfg, host, cutoff)
+        title_ctrls, pairs, dates = _collect_list(cfg, host, cutoff, log=log)
         scanned.append(f"{len(pairs)}条")
     if not pairs:
         store.mark_crawled(acc_id)

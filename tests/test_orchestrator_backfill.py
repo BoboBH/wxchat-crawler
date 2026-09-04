@@ -1,9 +1,11 @@
-"""老账号按截止日深度滚动回填测试(_covers_cutoff / _collect_list 回填模式)。
+"""老账号按截止日深度滚动回填测试(_covers_cutoff/_screen_fingerprint/_collect_list)。
 
 背景(2026-09-04 用户诉求):overlap_days=10 要「真正回填 10 天」,老账号
 不能再只读首屏 —— 最旧可见日期未早于截止日就继续下滚(至多
 deep_scroll_screens 屏),首屏已覆盖则零滚动,触底提前停,滚后回顶重扫。
-全部 monkeypatch 桩,不触真实 UIA。
+触底判定 = 条数不增 且 首标题 top 不动(滚半屏条数常不变,2026-09-04 实测)。
+收采一律先回顶(主页打开时滚动状态不可知);
+首次「未移动」先重试一屏再判触底。全部 monkeypatch 桩,不触真实 UIA。
 """
 import logging
 import sqlite3
@@ -22,13 +24,13 @@ class _FakeCtrl:
         self.BoundingRectangle = type("R", (), {"top": top})()
 
 
-def _ctrls(specs):
-    """[(标题, ISO日期或None)] → (ctrls, times);top 按序递增,time 略高于标题。"""
+def _ctrls(specs, base=0.0):
+    """[(标题, ISO日期或None)] → (ctrls, times);top 自 base 起按序递增 100。"""
     ctrls, times = [], []
     for i, (name, iso) in enumerate(specs):
-        ctrls.append(_FakeCtrl(name, 100.0 * (i + 1)))
+        ctrls.append(_FakeCtrl(name, base + 100.0 * (i + 1)))
         if iso:
-            times.append((iso, 100.0 * (i + 1) - 50))
+            times.append((iso, base + 100.0 * (i + 1) - 50))
     return ctrls, times
 
 
@@ -46,30 +48,35 @@ def _cfg(tmp_path, **over):
 
 
 class _Recorder:
-    """记录 scroll/scan 调用;scan 按预置屏序出数据,超出后重复末屏。"""
+    """记录 scroll/scan 调用;scan 按预置屏序出数据,超出后重复末屏。
 
-    def __init__(self, screens):
+    bases 为各屏视口基准 top(默认全 0);模拟「滚动了但条数不变」用位移。
+    """
+
+    def __init__(self, screens, bases=None):
         self.screens = screens
+        self.bases = bases
         self.scans = 0
         self.scrolls = 0
         self.tops = 0
 
     def scan_list(self, host, max_nodes=0):
         i = min(self.scans, len(self.screens) - 1)
+        base = self.bases[i] if self.bases else 0.0
         self.scans += 1
-        return _ctrls(self.screens[i])
+        return _ctrls(self.screens[i], base=base)
 
-    def scroll_once(self, host, wheels=10):
+    def scroll_once(self, host, wheels=10, anchor=None):
         self.scrolls += 1
 
-    def scroll_to_top(self, host, wheels=30, wait=0.0):
+    def scroll_to_top(self, host, wheels=30, wait=0.0, anchor=None):
         self.tops += 1
 
 
 @pytest.fixture
 def rec(monkeypatch):
-    def _install(screens):
-        r = _Recorder(screens)
+    def _install(screens, bases=None):
+        r = _Recorder(screens, bases)
         monkeypatch.setattr(orchestrator.bot, "scan_list", r.scan_list)
         monkeypatch.setattr(orchestrator.bot, "scroll_once", r.scroll_once)
         monkeypatch.setattr(orchestrator.bot, "scroll_to_top", r.scroll_to_top)
@@ -77,7 +84,7 @@ def rec(monkeypatch):
     return _install
 
 
-# ------------------------------------------------ _covers_cutoff 真值表
+# ------------------------------------------------ 判定函数真值表
 
 @pytest.mark.parametrize("dates,cutoff,expected", [
     (["2026-09-03", "2026-08-25"], "2026-08-28", True),   # 最旧已早于截止日
@@ -89,13 +96,55 @@ def test_covers_cutoff_truth_table(dates, cutoff, expected):
     assert orchestrator._covers_cutoff(dates, cutoff) is expected
 
 
+def test_same_screen_truth_table():
+    old = orchestrator._screen_fingerprint(
+        _ctrls([("甲", "2026-09-03"), ("乙", "2026-09-01")])[0])
+    same = orchestrator._screen_fingerprint(
+        _ctrls([("甲", "2026-09-03"), ("乙", "2026-09-01")])[0])
+    shifted = orchestrator._screen_fingerprint(
+        _ctrls([("甲", "2026-09-03"), ("乙", "2026-09-01")], base=150.0)[0])
+    grew = orchestrator._screen_fingerprint(
+        _ctrls([("甲", "2026-09-03"), ("乙", "2026-09-01"),
+                ("丙", "2026-08-25")])[0])
+    assert orchestrator._same_screen(old, same)      # 条数同 top 同 → 未动
+    assert not orchestrator._same_screen(old, shifted)  # 条数同但视口动了
+    assert not orchestrator._same_screen(old, grew)     # 条数增 → 没到底
+
+
+def test_fingerprint_is_snapshot_not_live_query():
+    """UIA 控件 rect 是活查询:指纹必须取扫描当时数值。模拟首读 100、
+    之后被滚走的控件 —— 快照后仍按 100 判;滚动后的新屏指纹(首读即
+    -1692)与快照不同 → 判「已移动」,而不是拿漂移值误判「未移动」。"""
+
+    class _TopCtrl:
+        def __init__(self, top):
+            self.Name = "甲"
+            self._top = top
+            self.reads = 0
+
+        @property
+        def BoundingRectangle(self):
+            self.reads += 1
+            return type("R", (), {"top": self._top})()
+
+    c = _TopCtrl(100.0)
+    fp = orchestrator._screen_fingerprint([c])
+    assert fp == (1, 100.0)          # 快照:扫描当时的值
+    c.BoundingRectangle              # 后续任何重读(即使值漂移)不影响快照
+    fp_moved = orchestrator._screen_fingerprint([_TopCtrl(-1692.0)])
+    assert not orchestrator._same_screen(fp, fp_moved)  # 漂移 ≠ 未动
+    assert orchestrator._same_screen(fp, orchestrator._screen_fingerprint(
+        [_TopCtrl(100.5)]))          # ±1.5px 内算未动
+
+
 # ------------------------------------------------ _collect_list 回填模式
 
 def test_first_screen_already_covers_no_scroll(tmp_path, rec):
     r = rec([[("新文", "2026-09-03"), ("旧文", "2026-08-25")]])
     _titles, pairs, _dates = orchestrator._collect_list(
         _cfg(tmp_path), "host", "2026-08-28")
-    assert (r.scans, r.scrolls, r.tops) == (1, 0, 0)  # 首屏已覆盖 → 零滚动
+    # 起始回顶(1 top)+首扫,首屏已覆盖 → 零扩量滚动
+    assert (r.scans, r.scrolls, r.tops) == (1, 0, 1)
     assert len(pairs) == 2
 
 
@@ -107,22 +156,52 @@ def test_deep_scrolls_until_covered_then_rescan_on_top(tmp_path, rec):
     _titles, pairs, _dates = orchestrator._collect_list(
         _cfg(tmp_path), "host", "2026-08-28")
     assert r.scrolls == 1              # 滚一屏即覆盖
-    assert r.tops == 1                 # 滚过 → 回顶重扫
+    assert r.tops == 2                 # 起始回顶 + 滚后回顶重扫
     assert r.scans == 3                # 首扫 + 滚后扫 + 回顶重扫
     assert [t for t, _d in pairs] == ["新文", "中", "旧"]
 
 
-def test_stop_at_bottom_without_top_rescan(tmp_path, rec):
+def test_same_count_but_viewport_shifted_keeps_scrolling(tmp_path, rec):
+    """滚半屏:条数不变但视口已动 → 不得误判触底(2026-09-04 真机回归)。"""
     r = rec(screens=[
-        [("新文", "2026-09-03")],
-        [("新文", "2026-09-03")],      # 触底:条数不增
-    ])
+        [("新文", "2026-09-03"), ("中", "2026-09-01")],
+        [("新文", "2026-09-03"), ("中", "2026-09-01")],   # 同条数,top 位移
+        [("新文", "2026-09-03"), ("中", "2026-09-01"), ("旧", "2026-08-25")],
+    ], bases=[0.0, 150.0, 300.0])
     _titles, pairs, _dates = orchestrator._collect_list(
         _cfg(tmp_path), "host", "2026-08-28")
-    assert r.scrolls == 1              # 试滚一屏
-    assert r.tops == 0                 # 未增 → 判触底,不再回顶重扫
-    assert r.scans == 2
-    assert len(pairs) == 1
+    assert r.scrolls == 2              # 位移屏不算触底,继续滚
+    assert r.tops == 2
+    assert r.scans == 4                # 首扫 + 2 滚后扫 + 回顶重扫
+    assert [t for t, _d in pairs] == ["新文", "中", "旧"]
+
+
+def test_frozen_first_scroll_retries_then_finds_coverage(tmp_path, rec):
+    """首次视口未移动可能是落点/前台问题(2026-09-04 终验实测):重试一屏
+    后若视口动了,继续回填而不是误判触底。"""
+    r = rec(screens=[
+        [("新文", "2026-09-03"), ("中", "2026-09-01")],
+        [("新文", "2026-09-03"), ("中", "2026-09-01")],   # 冻结(同条数同top)
+        [("新文", "2026-09-03"), ("中", "2026-09-01"), ("旧", "2026-08-25")],
+    ], bases=[0.0, 0.0, 300.0])
+    _titles, pairs, _dates = orchestrator._collect_list(
+        _cfg(tmp_path), "host", "2026-08-28")
+    assert r.scrolls == 2              # 冻结 → 重试一屏
+    assert r.tops == 2
+    assert [t for t, _d in pairs] == ["新文", "中", "旧"]
+
+
+def test_frozen_twice_is_really_bottom(tmp_path, rec):
+    r = rec(screens=[
+        [("新文", "2026-09-03"), ("中", "2026-09-01")],
+        [("新文", "2026-09-03"), ("中", "2026-09-01")],   # 第一次冻结
+        [("新文", "2026-09-03"), ("中", "2026-09-01")],   # 重试仍冻结 → 触底
+    ], bases=[0.0, 0.0, 0.0])
+    _titles, pairs, _dates = orchestrator._collect_list(
+        _cfg(tmp_path), "host", "2026-08-28")
+    assert r.scrolls == 2              # 只重试一次
+    assert r.tops == 1                 # 触底 → 不再回顶(仅起始回顶)
+    assert len(pairs) == 2
 
 
 def test_screen_cap_bounds_scrolling(tmp_path, rec):
@@ -134,8 +213,8 @@ def test_screen_cap_bounds_scrolling(tmp_path, rec):
     _titles, pairs, _dates = orchestrator._collect_list(
         _cfg(tmp_path, deep_scroll_screens=3), "host", "2026-08-28")
     assert r.scrolls == 3              # 屏数上限兜底
-    assert r.tops == 1
-    assert r.scans == 1 + 3 + 1
+    assert r.tops == 2                 # 起始回顶 + 屏满回顶
+    assert r.scans == 1 + 3 + 1        # 首扫 + 3 次滚后扫 + 回顶重扫
     assert len(pairs) == 5             # 回顶重扫取 growing[3] 屏(1+4 条)
 
 
@@ -143,7 +222,7 @@ def test_deep_scroll_disabled_zero_keeps_first_screen_only(tmp_path, rec):
     r = rec([[("新文", "2026-09-03")]])
     _titles, _pairs, _dates = orchestrator._collect_list(
         _cfg(tmp_path, deep_scroll_screens=0), "host", "2026-08-28")
-    assert (r.scans, r.scrolls, r.tops) == (1, 0, 0)
+    assert (r.scans, r.scrolls, r.tops) == (1, 0, 1)   # 仍先回顶再首扫
 
 
 def test_new_account_path_unchanged(tmp_path, rec):
@@ -155,7 +234,7 @@ def test_new_account_path_unchanged(tmp_path, rec):
     _titles, pairs, _dates = orchestrator._collect_list(
         _cfg(tmp_path), "host", None)  # 无水位线 → 新账号固定扩量
     assert r.scrolls == 2              # new_account_screens=2
-    assert r.tops == 1
+    assert r.tops == 2                 # 起始回顶 + 收尾回顶
     assert len(pairs) == 3
 
 
@@ -195,4 +274,4 @@ def test_process_account_backfills_missed_old_article(tmp_path, rec, monkeypatch
 
     assert st["ok"] and st["new"] == 2     # 新文 + 补回的漏网旧文
     assert titles_in_db == {"新文", "漏网旧文"}
-    assert (r.scrolls, r.tops) == (1, 1)
+    assert (r.scrolls, r.tops) == (1, 2)   # 滚一屏;起始回顶+滚后回顶

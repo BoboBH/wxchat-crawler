@@ -94,8 +94,10 @@ def test_process_account_logs_per_article_step_line(tmp_path, caplog, monkeypatc
     monkeypatch.setattr(bot, "find_profile_host",
                         lambda account=None, kicks=0: (100, object()))
     monkeypatch.setattr(bot, "close_article_tabs", lambda **kw: True)
-    monkeypatch.setattr(bot, "scroll_once", lambda host, wheels=10: None)
-    monkeypatch.setattr(bot, "scroll_to_top", lambda host, wheels=30, wait=0: None)
+    monkeypatch.setattr(bot, "scroll_once",
+                        lambda host, wheels=10, anchor=None: None)
+    monkeypatch.setattr(bot, "scroll_to_top",
+                        lambda host, wheels=30, wait=0, anchor=None: None)
     monkeypatch.setattr(bot, "scan_list",
                         lambda host, max_nodes=0:
                         ([_FakeCtrl("构建中国特色新闻学", 100.0)], [("昨天", 0.0)]))
