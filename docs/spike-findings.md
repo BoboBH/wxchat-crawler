@@ -511,3 +511,40 @@ URL 的控件 Name 就是文章标题);候选为 0、≥2、或归属存疑时�
    (默认 profile 被运行中的 Edge 占用会静默失败)+ `--print-to-pdf=<绝对路径>`;
 4. 文章 URL 两种形态(canonical 4 参数 / `/s/<token>` 短链)都可直接喂给
    无头浏览器;短链昨天实测更易被拦,优先用 canonical。
+
+---
+
+## 尖峰G:微信文章「···→打印」另存 PDF 全链路(2026-09-05,tools/spike_print_pdf.py)
+
+**结论:全链路实机打通**。《中金:美债收益率为何持续上升?》经
+「···→打印→目的地 Microsoft Print to PDF→打印→『将打印输出另存为』写路径→保存」
+落盘 `D:\temp\…pdf`(12 页,3.96MB,%PDF-1.7 验真)。全程微信登录会话内,零公网请求。
+与尖峰F 的「不采用」结论不冲突:打印链适合**单篇/少量补打**,批量仍不做(每篇都要
+抢前台合成点击,且用户已有自研 URL→PDF 程序)。
+
+### 链路控件事实
+
+| 环节 | 事实 |
+| --- | --- |
+| 「···(更多)」按钮 | 无 InvokePattern(尖峰D 定律),必须 ALT 技巧抢前台 + `Click(simulateMove=False)` |
+| 菜单项 | `MenuItemControl|FlueMenuItemView||打印 Ctrl+P|Invoke`,Invoke 后台生效 |
+| 打印预览窗 | **新顶层窗口** `Chrome_WidgetWin_0`(无标题),用句柄 diff 捕捉;预计览 12 页 PDF,文本 a11y 可读 |
+| 目的地校验 | 首个 `weui-popup-button-text` 里的 TextControl = "Microsoft Print to PDF";注意 `weui-popup-button-text`/`action-button`/`cancel-button` 是 **ClassName**,`destinationSettings` 等才是 AutomationId |
+| 执行/取消 | `action-button`(打印)、`cancel-button`(取消)均 Invoke;Invoke 无反应时兜底:验前台后合成 Click |
+| 另存为对话框 | 「将打印输出另存为」#32770:UIA 树里是预览窗的**树内子节点**(限深扫 max_depth≈4 找得到,全树轮询会超时);Win32 EnumWindows 看是 owned 顶层窗 |
+| 文件名写入 | SetValue 常 COM 异常 → 降级剪贴板粘贴(`{Ctrl}a{Ctrl}v`,存/还原剪贴板)→ 再降级键入;**每次必须读回 Value 确认含目标全路径**才点「保存」,否则取消放弃(防落错地址) |
+| 保存后 | 预览窗自动关闭,无残骸 |
+
+### 两条硬定律(排查必读)
+
+1. **模态 #32770 残留会卡死 AppEx 的 UIA 消息泵**:上一轮崩溃留下的「另存为」
+   模态框让下一轮 A 段 145s 无任何进展、COMError 满天飞。任何 UIA 操作前先
+   Win32 `EnumWindows` 找本进程可见 `#32770` → `WM_CLOSE` 清尸(WM_CLOSE 对保存
+   对话框=取消,不落盘);UIA 层面的取消在泵被卡时根本执行不到。
+2. **UIA 树抖动期(预览开/关瞬间)到处抛 `_ctypes.COMError`**
+   (-2146233083 / -2147220991「事件无法调用任何订户」):所有 `GetRootControl()
+   .GetChildren()`、遍历中的属性读都必须 try/except+重试包裹;保存成功后预览
+   自毁,遍历它的循环读到失效元素是常态而非异常。
+
+另:预览的设置侧栏控件打开几分钟后会被 a11y 树**剪枝** → 打开预览后必须立即执行
+保存流程;合成键鼠还曾误触出「重命名」对话框——后台进程发键前先确认焦点落点。
