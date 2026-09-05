@@ -26,8 +26,10 @@ import uiautomation as uia
 APP_CLASS = "Chrome_WidgetWin_0"          # AppEx 顶层窗口类名
 APP_PROCESS = "wechatappex.exe"           # AppEx 进程映像名
 HOST_CLASS = "Chrome_RenderWidgetHostHWND"  # 网页内容宿主(aid 每次导航都变)
-CLASS_TITLE = "article__item__title"      # 主页列表条目标题
-CLASS_TIME = "publish_time"               # 主页日期分组标签
+CLASS_TITLE = "article__item__title"      # 主页列表条目标题(模板A,双下划线)
+CLASS_ITEM_BODY = "article-item__body"    # 主页条目标题容器(模板B,单连字符;
+                                          # 标题文本挂在其无类名子 Text 上)
+CLASS_TIME = "publish_time"               # 主页日期分组标签(模板B为每卡一个)
 CLASS_CARD = "js_article_card"            # 列表条目卡片(带 InvokePattern)
 CLASS_MORE_BAR = "article-list__more-bar"  # 「余下N篇」折叠条(InvokePattern 展开)
 SEARCH_INPUT_ID = "weixin-search-input"   # 搜索页输入框 AutomationId
@@ -219,11 +221,13 @@ def find_host(pred, max_nodes: int = 2500):
 
 
 def find_profile_host(account: str | None = None, kicks: int = 2):
-    """找公众号主页宿主:树里有 article__item__title;account 给定时
+    """找公众号主页宿主:树里有列表条目标题节点;account 给定时
     还要求 doc 名含账号名。树折叠时 kick 后重找。返回 (win, host)。
 
     两段式筛选(尖峰C):谓词阶段无法同时拿到宿主与 doc 名,先在每窗口
-    找「有标题」的宿主,再校验其 doc 名。
+    找「有标题」的宿主,再校验其 doc 名。标题节点两种模板都认:
+    模板A=article__item__title(多数号),模板B=article-item__body
+    (中国银河宏观等,2026-09-05 实机诊断发现)。
     """
     for i in range(kicks + 1):
         found = None
@@ -238,7 +242,7 @@ def find_profile_host(account: str | None = None, kicks: int = 2):
                         continue
                 except Exception:
                     continue
-                hit = any((c.ClassName or "") == CLASS_TITLE
+                hit = any((c.ClassName or "") in (CLASS_TITLE, CLASS_ITEM_BODY)
                           for c in walk_ctrls(h, max_nodes=2500))
                 if hit:
                     doc = host_doc_name(h)
@@ -313,9 +317,40 @@ def active_doc(win) -> str:
 
 # ---------------------------------------------------------------- 主页列表
 
+def _first_text_docorder(ctrl, depth: int = 3):
+    """文档序找首个非空 Name 后代(限深)。
+
+    必须**文档序**:walk_ctrls 是栈式 DFS(子节点逆序产出),2026-09-05
+    银河宏观真跑实证 body 文档序=[标题Text, 阅读数desc],逆序会先拿到
+    「阅读N赞M」当标题,全量 PENDING。
+    """
+    try:
+        kids = list(ctrl.GetChildren())
+    except Exception:
+        return None
+    for k in kids:
+        try:
+            if (k.Name or "").strip():
+                return k
+        except Exception:
+            continue
+    if depth > 1:
+        for k in kids:
+            got = _first_text_docorder(k, depth - 1)
+            if got is not None:
+                return got
+    return None
+
+
 def scan_list(host, max_nodes: int = 4000):
     """读主页列表,返回 (title_ctrls, time_pairs):
-    title_ctrls 为标题控件列表(按纵序),time_pairs 为 [(日期文本, top)]。"""
+    title_ctrls 为标题控件列表(按纵序),time_pairs 为 [(日期文本, top)]。
+
+    标题节点认两种模板:模板A=article__item__title(文本在自身 Name);
+    模板B=article-item__body(容器 Name 为空,标题文本挂在其子 Text 上,
+    取文档序首个非空后代 —— 2026-09-05 中国银河宏观实机诊断;控件用该
+    Text,open_article_and_get_url 会向上找可 Invoke 祖先卡,与模板A同路)。
+    """
     titles, times = [], []
     for c in walk_ctrls(host, max_nodes=max_nodes):
         cls = ""
@@ -326,6 +361,13 @@ def scan_list(host, max_nodes: int = 4000):
         if cls == CLASS_TITLE:
             try:
                 titles.append((c, c.BoundingRectangle.top))
+            except Exception:
+                continue
+        elif cls == CLASS_ITEM_BODY:
+            try:
+                kid = _first_text_docorder(c)
+                if kid is not None:
+                    titles.append((kid, kid.BoundingRectangle.top))
             except Exception:
                 continue
         elif cls == CLASS_TIME:
