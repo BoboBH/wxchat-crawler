@@ -890,7 +890,8 @@ def extract_article_urls(host, max_nodes: int = 5000):
 
     兼容包装(见 scan_article_page)。注意:多 URL 页面的树内集合**可能
     全是页内嵌入链接**,不含页面自身 URL —— 取舍逻辑在
-    open_article_and_get_url(单 URL 才直接用,多 URL 走「复制链接」兜底)。
+    open_article_and_get_url(2026-09-05 起主路径是「复制链接」菜单,
+    树内唯一可信候选只是菜单失败后的兜底)。
     """
     _t, urls, n = scan_article_page(host, max_nodes=max_nodes)
     return urls, n
@@ -923,9 +924,10 @@ def select_trusted_url(urls: dict, page_title: str | None,
 
     采信 = 恰好 1 个候选,且「页面标题(读不到时退回期望标题)」与该 URL
     控件的 Name 双向包含(尖峰C:文章自身 URL 的控件 Name 就是文章标题)。
-    0 个、≥2 个、或归属验证不过、或两个标题都拿不到 → 一律返回 None,
-    调用方走「··· → 复制链接」菜单兜底 —— 树序首个候选在污染页(内嵌 475 个
-    mp URL)上几乎必是别人的文章,绝不能按遍历顺序猜。
+    0 个、≥2 个、或归属验证不过、或两个标题都拿不到 → 一律返回 None。
+    2026-09-05 起「··· → 复制链接」是主路径,本函数退居兜底(菜单失败才
+    到这里)—— 树序首个候选在污染页(内嵌 475 个 mp URL)上几乎必是别人
+    的文章,无论主兜都绝不能按遍历顺序猜。
     """
     if len(urls) != 1:
         return None
@@ -950,15 +952,15 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
     标题 TextControl 自身无 InvokePattern,向上最多 5 级找可 Invoke 的祖先卡片
     (尖峰C:class js_article_card…)。
 
-    URL 取用策略(尖峰D 实测后):
-      * 树内恰 1 个 mp URL **且归属有据** → 直接用(中金点睛 13 篇全为此形态,
-        主路径不变)。归属证据 = URL 控件 Name ≈ 页面标题(尖峰C:文章自身
-        URL 的控件 Name 就是文章标题;标题只证明「页面身份」,不证明
-        「URL 归属」—— 页面恰嵌 1 个他人链接时计数信任同样会被骗);
-      * 树内 0 个、≥2 个、或唯一候选归属存疑 → 用「··· → 复制链接」菜单
-        兜底(复制的是页面自身 URL,见 copy_link_via_menu);菜单也拿不到时
-        返回 (None, 0) 留待下轮,**不再**用「最短者」猜 —— 验收实测最短者
-        是别人的文章(本篇 475 个内链里最短者为主文外的一篇)。
+    URL 取用策略(2026-09-05 调整为「短链优先」,尖峰D 实测为基):
+      * 主路径:「··· → 复制链接」菜单取页面自身 URL(短链)—— 下游
+        playwright 消费 canonical 全参链接会被微信拦去人工验证,短链才能
+        全自动(2026-09-05 用户需求)。菜单复制不受页内嵌入链接污染;
+      * 兜底:树内恰 1 个 mp URL **且归属有据**才用。归属证据 = URL 控件
+        Name ≈ 页面标题(尖峰C:文章自身 URL 的控件 Name 就是文章标题;
+        标题只证明「页面身份」,不证明「URL 归属」—— 页面恰嵌 1 个他人
+        链接时计数信任同样会被骗);0/≥2/归属存疑 → 返回 (None, 0) 留待
+        下轮,**绝不**按树序猜 —— 污染页首个候选几乎必是别人的文章;
       * 所有成功路径都必须先关文章 tab 再返回(泄漏的 tab 会拖慢下一篇的
         残留防护,收尾时还会让 close_profile_tab 拒关主页 tab)。
     """
@@ -994,11 +996,12 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
         return None, -1
     # 标题与 URL 一趟扫描拿齐(标题 aid 在树尾部,见 scan_article_page);
     # expected_title 给定时标题是硬校验,读不到就多扫几轮再下结论。
+    # 短链主路径只依赖页标题,标题一到就开走,不等树内 URL。
     deadline = time.time() + scan_timeout
     page_t, urls = "", {}
     while True:
         page_t, urls, _n = scan_article_page(h, max_nodes=max(max_nodes, 12000))
-        if urls and (page_t or expected_title is None):
+        if page_t or expected_title is None:
             break
         if time.time() >= deadline:
             break
@@ -1008,23 +1011,33 @@ def open_article_and_get_url(title_ctrl, open_timeout: float = 40.0,
         if not close_active_tab(wait=close_wait):
             close_article_tabs(max_close=2, wait=close_wait)
         return None, -2
-    # 树内 0 个、≥2 个、或唯一候选归属存疑 → 全部丢弃,走「··· → 复制链接」
-    # 菜单兜底(策略集中在 select_trusted_url,可单测)。≥2 时若按树序取首,
-    # 污染页(内嵌 475 个 mp URL)几乎必取到别人的文章 —— 且入库后是终态
-    # ok 行,永不重试,比最短者启发式更糟。scan_article_page 存的 Name 截到
-    # 40 字,截断保留前缀,双向包含判断不受影响。
+    # 主路径(2026-09-05 调整,用户需求):「··· → 复制链接」优先 —— 下游
+    # playwright 对 canonical 全参链接会被微信拦去人工验证,短链可全自动。
+    # 菜单复制的是本页自身 URL,不受内嵌链接污染;-2 分支已提前返回,
+    # 不会把别人的页复制进来。
+    menu_url = copy_link_via_menu(close_wait=close_wait, win=win) if title_ok else None
+    if menu_url:
+        if not close_active_tab(wait=close_wait):
+            close_article_tabs(max_close=2, wait=close_wait)
+        return menu_url, 1  # 按本页自身 URL 上报(canonicalize 归一为短链)
+    # 兜底:树内唯一候选且归属有据才采信(策略集中在 select_trusted_url,
+    # 可单测)。0/≥2/归属存疑一律丢弃 —— 树序首个候选在污染页(内嵌 475 个
+    # mp URL)上几乎必是别人的文章,且入库后是终态 ok 行,永不重试。
+    # scan_article_page 存的 Name 截到 40 字,截断保留前缀,双向包含不受影响。
+    if not urls:
+        # 菜单失败且首扫 0 候选:再给树一点加载时间(只在兜底路径等,不拖慢主路径)
+        while time.time() < deadline:
+            time.sleep(1.0)
+            page_t, urls, _n = scan_article_page(h, max_nodes=max(max_nodes, 12000))
+            if urls:
+                break
     own = select_trusted_url(urls, page_t, expected_title)
     if own is not None:  # 此处 urls 只可能是「唯一且归属已验证」的候选
         if not close_active_tab(wait=close_wait):
             close_article_tabs(max_close=2, wait=close_wait)
         return own, 1
-    # 0 个可信候选:「··· → 复制链接」菜单兜底(copy 的就是本页 URL,
-    # 不受内嵌链接污染)。-2 分支已提前返回,不会走到这里。
-    menu_url = copy_link_via_menu(close_wait=close_wait, win=win) if title_ok else None
     if not close_active_tab(wait=close_wait):
         close_article_tabs(max_close=2, wait=close_wait)
-    if menu_url:
-        return menu_url, 1  # 菜单拿的是本页自身 URL,按 1 个可信候选上报
     return None, 0
 
 
@@ -1060,7 +1073,7 @@ def _dismiss_menu():
 
 
 def copy_link_via_menu(close_wait: float = 2.5, win=None) -> str | None:
-    """「··· → 复制链接」菜单兜底:返回页面自身 raw URL,失败返回 None。
+    """「··· → 复制链接」取页面自身短链(2026-09-05 起为提取主路径);失败 None。
 
     尖峰D 实测(2026-09-03,郭磊宏观茶座,连续 2 次成功):
       * 入口是浏览器工具条 `AppMenuButton Name=更多`(无 InvokePattern;
@@ -1098,6 +1111,15 @@ def copy_link_via_menu(close_wait: float = 2.5, win=None) -> str | None:
                 break
         if btn is None:
             return None
+        # 菜单靠合成鼠标打开,Click 只在前台生效(尖峰D);主路径化后每篇都
+        # 走这里,先尽力把本窗口置前,拿不到也照试(原兜底场景多已在前台)。
+        try:
+            hwnd0 = getattr(targets[0], "NativeWindowHandle", None)
+            if hwnd0 and not _foreground_is(hwnd0):
+                _force_foreground(hwnd0)
+                time.sleep(0.5)
+        except Exception:
+            pass
         try:
             btn.Click(simulateMove=False)
         except Exception:
