@@ -11,8 +11,6 @@
 """
 import logging
 
-import pytest
-
 from src import orchestrator
 from src.config import CrawlConfig, MysqlConfig
 
