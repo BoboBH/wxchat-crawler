@@ -1,6 +1,4 @@
 """config 加载测试:正常路径、缺文件、缺字段、非法值。"""
-from pathlib import Path
-
 import pytest
 
 from src.config import ConfigError, load_config
@@ -25,7 +23,6 @@ article:
   close_tab_wait_sec: 2.5
   kick_retry: 2
 run:
-  db_path: data/crawler.db
   log_dir: logs
 """
 ACCOUNTS = "accounts:\n  - 中金点睛\n  - 郭磊宏观茶座\n"
@@ -49,7 +46,11 @@ def test_load_ok(tmp_path):
     assert cfg.article_open_timeout_sec == 40
     assert isinstance(cfg.scroll_wait_sec, float)
     assert isinstance(cfg.article_open_timeout_sec, float)
-    assert cfg.db_path == Path("data/crawler.db")
+    # 存储只有 MySQL 一条通道(2026-09-05):连接参数来自 .env/环境变量,
+    # yaml 里只有表名;此处验证默认表名归一。
+    assert cfg.mysql.table_accounts == "wechat_crawler_accounts"
+    assert cfg.mysql.table_articles == "wechat_crawler_articles"
+    assert cfg.mysql.table_runs == "wechat_crawler_runs"
     assert cfg.accounts == ["中金点睛", "郭磊宏观茶座"]
 
 

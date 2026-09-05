@@ -14,9 +14,15 @@ import logging
 import pytest
 
 from src import orchestrator
-from src.config import CrawlConfig
+from src.config import CrawlConfig, MysqlConfig
 
 LOG = logging.getLogger("tab-hygiene")
+
+# 独立测试库表名(与根 conftest.py 约定一致);真正连库的用例经
+# mysql_ready/store 夹具注入带连接参数的配置。
+_TEST_DB = MysqlConfig(database="wxchat_crawler_test",
+                       table_accounts="wt_accounts",
+                       table_articles="wt_articles", table_runs="wt_runs")
 
 
 def _cfg(tmp_path, **over):
@@ -26,7 +32,7 @@ def _cfg(tmp_path, **over):
               scroll_wait_sec=0.0, account_gap_min_sec=0, account_gap_max_sec=0,
               article_open_timeout_sec=1.0, url_scan_timeout_sec=1.0,
               max_tree_nodes=500, close_tab_wait_sec=0.0, kick_retry=1,
-              db_path=tmp_path / "db.sqlite", log_dir=tmp_path / "logs",
+              log_dir=tmp_path / "logs", mysql=_TEST_DB,
               accounts=["测试号"])
     kw.update(over)
     return CrawlConfig(**kw)
@@ -69,29 +75,28 @@ class _Recorder:
                              "&mid=1&idx=1&sn=aa", 1))
 
 
-def test_process_account_cleans_stale_tabs_before_search(tmp_path, monkeypatch):
+def test_process_account_cleans_stale_tabs_before_search(tmp_path, monkeypatch,
+                                                         mysql_ready, store,
+                                                         make_name):
     rec = _Recorder(monkeypatch)
-    from src.db import Store
-    cfg = _cfg(tmp_path)
-    store = Store(cfg.db_path)
-    st = orchestrator.process_account(store, cfg, "测试号", LOG)
-    store.close()
+    name = make_name("测试号")
+    cfg = _cfg(tmp_path, mysql=mysql_ready, accounts=[name])
+    st = orchestrator.process_account(store, cfg, name, LOG)
     assert st["ok"] is True
     # 开主页前先清残留文章 tab + 同账号主页 tab;收尾再关主页 tab
     assert rec.seq[:3] == ["close_article_tabs", "close_profile_tab", "search"]
     assert rec.seq[-1] == "close_profile_tab"
 
 
-def test_search_failure_still_cleans(tmp_path, monkeypatch):
+def test_search_failure_still_cleans(tmp_path, monkeypatch, mysql_ready, store,
+                                     make_name):
     rec = _Recorder(monkeypatch)
     monkeypatch.setattr(orchestrator.bot, "search_open_profile",
                         lambda name:
                         rec.seq.append("search") or (False, "搜索失败"))
-    from src.db import Store
-    cfg = _cfg(tmp_path)
-    store = Store(cfg.db_path)
-    st = orchestrator.process_account(store, cfg, "测试号", LOG)
-    store.close()
+    name = make_name("测试号")
+    cfg = _cfg(tmp_path, mysql=mysql_ready, accounts=[name])
+    st = orchestrator.process_account(store, cfg, name, LOG)
     assert st["ok"] is False
     # 搜索失败的早退路径:前置清理照做,失败后也尽力收主页 tab
     assert rec.seq == ["close_article_tabs", "close_profile_tab", "search",
@@ -138,7 +143,7 @@ def test_run_end_of_round_sweeps_tabs(tmp_path, monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(orchestrator, "Store", lambda path: _Store())
+    monkeypatch.setattr(orchestrator, "Store", lambda cfg: _Store())
     monkeypatch.setattr(orchestrator.random, "shuffle", lambda x: None)
     monkeypatch.setattr(orchestrator.time, "sleep", lambda s: None)
     monkeypatch.setattr(orchestrator.notify_mod, "send_markdown",

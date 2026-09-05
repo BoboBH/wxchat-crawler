@@ -8,14 +8,20 @@ deep_scroll_screens 屏),首屏已覆盖则零滚动,触底提前停,滚后回�
 首次「未移动」先重试一屏再判触底。全部 monkeypatch 桩,不触真实 UIA。
 """
 import logging
-import sqlite3
 
 import pytest
 
 from src import orchestrator
-from src.config import CrawlConfig
+from src.config import CrawlConfig, MysqlConfig
 
 LOG = logging.getLogger("crawler")
+
+# 独立测试库的表名(与根 conftest.py 约定一致);纯采集测试不真正连库,
+# 只有走 Store 的用例(见 test_process_account_backfills_missed_old_article)
+# 通过 mysql_ready 夹具注入带连接参数的配置。
+_TEST_DB = MysqlConfig(database="wxchat_crawler_test",
+                       table_accounts="wt_accounts",
+                       table_articles="wt_articles", table_runs="wt_runs")
 
 
 class _FakeCtrl:
@@ -41,7 +47,7 @@ def _cfg(tmp_path, **over):
               scroll_wait_sec=0.0, account_gap_min_sec=0, account_gap_max_sec=0,
               article_open_timeout_sec=1.0, url_scan_timeout_sec=1.0,
               max_tree_nodes=500, close_tab_wait_sec=0.0, kick_retry=1,
-              db_path=tmp_path / "db.sqlite", log_dir=tmp_path / "logs",
+              log_dir=tmp_path / "logs", mysql=_TEST_DB,
               accounts=["测试号"])
     kw.update(over)
     return CrawlConfig(**kw)
@@ -267,7 +273,9 @@ def test_no_fold_bars_no_extra_scan(tmp_path, rec):
 
 # --------------------------------- process_account 集成:真把漏网旧文补回来
 
-def test_process_account_backfills_missed_old_article(tmp_path, rec, monkeypatch):
+def test_process_account_backfills_missed_old_article(tmp_path, rec, monkeypatch,
+                                                      mysql_ready, store,
+                                                      make_name):
     monkeypatch.setattr(orchestrator.bot, "search_open_profile",
                         lambda name: (True, ""))
     monkeypatch.setattr(orchestrator.bot, "find_profile_host",
@@ -282,23 +290,25 @@ def test_process_account_backfills_missed_old_article(tmp_path, rec, monkeypatch
     ])
     monkeypatch.setattr(orchestrator.bot, "open_article_and_get_url",
                         lambda ctrl, **kw: next(urls))
+    # 标题每测唯一:dedup 键全库唯一,常量标题第二轮必撞首轮的行
+    t_new, t_old = make_name("新文"), make_name("漏网旧文")
     # 首屏只有新文;滚一屏露出 08-20 的漏网旧文(≤ 截止日 08-22 → 停滚回顶)
     r = rec(screens=[
-        [("新文", "2026-09-03")],
-        [("新文", "2026-09-03"), ("漏网旧文", "2026-08-20")],
+        [(t_new, "2026-09-03")],
+        [(t_new, "2026-09-03"), (t_old, "2026-08-20")],
     ])
 
-    cfg = _cfg(tmp_path, overlap_days=10)  # 截止日 = 水位线09-01 - 10 = 08-22
-    from src.db import Store
-    store = Store(cfg.db_path)
-    acc_id = store.get_or_create_account("测试号")
+    name = make_name("测试号")
+    cfg = _cfg(tmp_path, overlap_days=10, mysql=mysql_ready,
+               accounts=[name])  # 截止日 = 水位线09-01 - 10 = 08-22
+    acc_id = store.get_or_create_account(name)
     store.set_watermark(acc_id, "2026-09-01")
-    st = orchestrator.process_account(store, cfg, "测试号", LOG)
-    with sqlite3.connect(cfg.db_path) as con:
-        titles_in_db = {t for (t,) in con.execute(
-            "SELECT title FROM articles WHERE account_id=?", (acc_id,))}
-    store.close()
+    st = orchestrator.process_account(store, cfg, name, LOG)
+    with store.conn.cursor() as c:
+        c.execute(f"SELECT title FROM `{store.cfg.table_articles}` "
+                  "WHERE account_id=%s", (acc_id,))
+        titles_in_db = {row["title"] for row in c.fetchall()}
 
     assert st["ok"] and st["new"] == 2     # 新文 + 补回的漏网旧文
-    assert titles_in_db == {"新文", "漏网旧文"}
+    assert titles_in_db == {t_new, t_old}
     assert (r.scrolls, r.tops) == (1, 2)   # 滚一屏;起始回顶+滚后回顶

@@ -2,8 +2,8 @@
 
 背景(2026-09-03 用户诉求):「每次反馈结果,都打印日期和时间,我要知道
 每一步的进展和时耗」—— 日志行带完整日期(datefmt)+ 每步(含逐篇)用时。
-只测编排层日志形状,不触真实 UIA(全部 monkeypatch 桩),store 用 tmp_path
-真库(与 test_db.py 同前提)。
+只测编排层日志形状,不触真实 UIA(全部 monkeypatch 桩);集成用例的 store
+走 MySQL 测试库(根 conftest 夹具,与 test_db.py 同前提)。
 """
 import logging
 import re
@@ -11,9 +11,15 @@ import re
 import pytest
 
 from src import orchestrator
-from src.config import CrawlConfig
+from src.config import CrawlConfig, MysqlConfig
 
 LOG = logging.getLogger("crawler")
+
+# 独立测试库表名(与根 conftest.py 约定一致);本文件只有集成用例真连库,
+# 经 mysql_ready/store 夹具注入带连接参数的配置,其余用例不触数据库。
+_TEST_DB = MysqlConfig(database="wxchat_crawler_test",
+                       table_accounts="wt_accounts",
+                       table_articles="wt_articles", table_runs="wt_runs")
 
 
 # ------------------------------------------------ fmt_duration 真值表
@@ -74,22 +80,29 @@ class _FakeCtrl:
         self.BoundingRectangle = type("R", (), {"top": top})()
 
 
-def _cfg(tmp_path) -> CrawlConfig:
-    return CrawlConfig(
-        process_name="WeChat.exe", exe_path="C:/x/WeChat.exe",
-        expected_version_prefix="3.9", stop_streak=3, overlap_days=3,
-        new_account_screens=2, deep_scroll_screens=40,
-        scroll_wait_sec=0.0, account_gap_min_sec=0,
-        account_gap_max_sec=0, article_open_timeout_sec=1.0,
-        url_scan_timeout_sec=1.0, max_tree_nodes=500, close_tab_wait_sec=0.0,
-        kick_retry=1, db_path=tmp_path / "db.sqlite", log_dir=tmp_path / "logs",
-        accounts=["测试号"])
+def _cfg(tmp_path, **over) -> CrawlConfig:
+    kw = dict(process_name="WeChat.exe", exe_path="C:/x/WeChat.exe",
+              expected_version_prefix="3.9", stop_streak=3, overlap_days=3,
+              new_account_screens=2, deep_scroll_screens=40,
+              scroll_wait_sec=0.0, account_gap_min_sec=0,
+              account_gap_max_sec=0, article_open_timeout_sec=1.0,
+              url_scan_timeout_sec=1.0, max_tree_nodes=500,
+              close_tab_wait_sec=0.0, kick_retry=1,
+              log_dir=tmp_path / "logs",
+              mysql=MysqlConfig(database="wxchat_crawler_test",
+                                table_accounts="wt_accounts",
+                                table_articles="wt_articles",
+                                table_runs="wt_runs"),
+              accounts=["测试号"])
+    kw.update(over)
+    return CrawlConfig(**kw)
 
 
-def test_process_account_logs_per_article_step_line(tmp_path, caplog, monkeypatch):
-    from src.db import Store
+def test_process_account_logs_per_article_step_line(tmp_path, caplog, monkeypatch,
+                                                    mysql_ready, store, make_name):
     from src import wechat_bot as bot
 
+    title = make_name("文")  # 每测唯一:dedup 键全局唯一,固定标题重跑必撞
     monkeypatch.setattr(bot, "search_open_profile", lambda name: (True, ""))
     monkeypatch.setattr(bot, "find_profile_host",
                         lambda account=None, kicks=0: (100, object()))
@@ -100,26 +113,26 @@ def test_process_account_logs_per_article_step_line(tmp_path, caplog, monkeypatc
                         lambda host, wheels=30, wait=0, anchor=None: None)
     monkeypatch.setattr(bot, "scan_list",
                         lambda host, max_nodes=0:
-                        ([_FakeCtrl("构建中国特色新闻学", 100.0)], [("昨天", 0.0)]))
+                        ([_FakeCtrl(title, 100.0)], [("昨天", 0.0)]))
     monkeypatch.setattr(bot, "close_profile_tab", lambda name, wait=0: True)
     monkeypatch.setattr(bot, "open_article_and_get_url",
                         lambda ctrl, **kw:
                         ("https://mp.weixin.qq.com/s?__biz=MzA1&mid=100&idx=1&sn=abc123", 3))
 
-    cfg = _cfg(tmp_path)
-    store = Store(cfg.db_path)
-    acc_id = store.get_or_create_account("测试号")
+    name = make_name("测试号")
+    cfg = _cfg(tmp_path, mysql=mysql_ready, accounts=[name])
+    acc_id = store.get_or_create_account(name)
     store.set_watermark(acc_id, "2026-09-01")  # 有水位线 → 走单次扫描,不扩量
 
     with caplog.at_level(logging.INFO, logger="crawler"):
-        st = orchestrator.process_account(store, cfg, "测试号", LOG, position="1/1")
-    store.close()
+        st = orchestrator.process_account(store, cfg, name, LOG, position="1/1")
 
+    esc = re.escape(name)
     msgs = [r.getMessage() for r in caplog.records]
-    assert any(re.fullmatch(r"\[测试号\] 开始处理账号\(1/1\)", m) for m in msgs)
-    assert any(re.fullmatch(r"\[测试号\] 第1/1篇《构建中国特色新闻学》打开文章页提取URL …", m)
+    assert any(re.fullmatch(rf"\[{esc}\] 开始处理账号\(1/1\)", m) for m in msgs)
+    assert any(re.fullmatch(rf"\[{esc}\] 第1/1篇《{re.escape(title)}》打开文章页提取URL …", m)
                for m in msgs)
     # 既有「+ 标题 (日期) url=状态」行保持原文,仅追加 结果(用时Xs)
-    assert any(re.fullmatch(r"\[测试号\] \+ 构建中国特色新闻学 \(昨天\) url=ok → 新增\(用时\d+\.\d+s\)", m)
+    assert any(re.fullmatch(rf"\[{esc}\] \+ {re.escape(title)} \(昨天\) url=ok → 新增\(用时\d+\.\d+s\)", m)
                for m in msgs)
     assert st["message"] == "扫描1条,新增1,补URL0,待补0"  # 既有汇总文案不变

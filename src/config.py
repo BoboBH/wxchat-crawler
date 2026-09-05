@@ -1,4 +1,4 @@
-"""配置加载:settings.yaml(参数+钉钉通知+MySQL 镜像)+ accounts.yaml(公众号名单)。"""
+"""配置加载:settings.yaml(参数+钉钉通知+MySQL 主库表名)+ accounts.yaml(公众号名单)。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -33,7 +33,6 @@ class CrawlConfig:
     max_tree_nodes: int
     close_tab_wait_sec: float
     kick_retry: int
-    db_path: Path
     log_dir: Path
     fail_retry: int = 3          # 账号失败后的重试次数(0=不重试)
     fail_retry_wait_sec: float = 10.0  # 重试前暂停秒数
@@ -58,21 +57,22 @@ class NotifyConfig:
 
 @dataclass
 class MysqlConfig:
-    """MySQL 镜像库:每轮抓取结束把 SQLite 全量同步过去(SQLite 仍是主库)。
+    """MySQL 主库(2026-09-05 起唯一存储,SQLite 已弃用)。
 
     连接参数(host/port/user/password/database)不走配置文件,从环境变量
     读取:系统环境变量优先,其次项目根 .env(已 gitignore,凭据不入库)。
-    settings.yaml 的 mysql: 节只放行为开关与表名。
+    settings.yaml 的 mysql: 节只放表名。库=用户指定 `test`(勿改名),
+    库/表自动创建。
     """
 
-    enabled: bool = False
     host: str = "localhost"
     port: int = 3306
     user: str = "root"
     password: str = ""
-    database: str = "wechat_crawler"
+    database: str = "test"
     table_accounts: str = "wechat_crawler_accounts"
     table_articles: str = "wechat_crawler_articles"
+    table_runs: str = "wechat_crawler_runs"
 
 
 # 环境变量名带项目前缀(2026-09-04 用户要求):MYSQL_* 区分度太低,容易与
@@ -149,9 +149,10 @@ def _parse_notify(n) -> NotifyConfig:
 
 
 def _parse_mysql(m, env: dict[str, str] | None = None) -> MysqlConfig:
-    """mysql: 节(enabled/表名)+ 环境变量(连接参数)→ MysqlConfig。
+    """mysql: 节(表名)+ 环境变量(连接参数)→ MysqlConfig。
 
-    连接参数查找顺序:系统环境变量 > .env 文件 > 内置默认。
+    连接参数查找顺序:系统环境变量 > .env 文件 > 内置默认(库默认 test,
+    用户指定勿改名)。
     """
     if m is not None and not isinstance(m, dict):
         raise ConfigError("settings.mysql 必须是键值映射")
@@ -164,16 +165,16 @@ def _parse_mysql(m, env: dict[str, str] | None = None) -> MysqlConfig:
         return env.get(WXCHAT_CRAWLER_ENV_KEYS[field], "").strip()
 
     return MysqlConfig(
-        enabled=_parse_bool(m.get("enabled", False), "mysql.enabled"),
         host=env_val("host") or "localhost",
         port=int(env_val("port") or 3306),
         user=env_val("user") or "root",
         password=env_val("password"),
-        database=env_val("database") or "wechat_crawler",
+        database=env_val("database") or "test",
         table_accounts=str(m.get("table_accounts")
                            or "wechat_crawler_accounts").strip(),
         table_articles=str(m.get("table_articles")
                            or "wechat_crawler_articles").strip(),
+        table_runs=str(m.get("table_runs") or "wechat_crawler_runs").strip(),
     )
 
 
@@ -216,7 +217,6 @@ def load_config(settings_path=DEFAULT_SETTINGS,
         max_tree_nodes=int(_require(article, "max_tree_nodes", "settings.article")),
         close_tab_wait_sec=float(_require(article, "close_tab_wait_sec", "settings.article")),
         kick_retry=int(_require(article, "kick_retry", "settings.article")),
-        db_path=Path(str(_require(run, "db_path", "settings.run"))),
         log_dir=Path(str(_require(run, "log_dir", "settings.run"))),
         accounts=accounts,
     )

@@ -30,16 +30,15 @@ article:
 # 运行
 run:
   # 相对路径以进程工作目录为基准(手动运行请在仓库根目录执行)
-  db_path: data/crawler.db
   log_dir: logs
 
-# MySQL 镜像库(每轮结束把 SQLite 全量同步过去,幂等可重放;SQLite 仍是主库)
+# MySQL 主库(2026-09-05 起唯一存储,SQLite 已弃用;库/表自动创建)
 # 连接参数(host/port/user/password/database)不放这里 —— 在项目根 .env
-# (gitignore,凭据不入库),系统环境变量优先于 .env;库/表自动创建
+# (gitignore,凭据不入库),系统环境变量优先于 .env;这里只放表名
 mysql:
-  enabled: true
   table_accounts: wechat_crawler_accounts
   table_articles: wechat_crawler_articles
+  table_runs: wechat_crawler_runs
 
 # 钉钉推送(逐篇即推:每抓到一篇新文章 URL 立即发一条,不聚合)
 notify:

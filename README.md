@@ -1,8 +1,8 @@
 # 微信公众号文章爬虫(UIA 直取)
 
 用公众号名称在 PC 微信中搜索并打开其主页,**手动单轮**增量抓取新发布文章的
-URL、标题、发布时间,存入本地 SQLite,并镜像到 MySQL。(定时任务已于
-2026-09-04 删除,现仅手动运行:`python run_crawl.py`,见下。)
+URL、标题、发布时间,存入本机 MySQL 主库(2026-09-05 起 SQLite 已弃用)。
+(定时任务已于 2026-09-04 删除,现仅手动运行:`python run_crawl.py`,见下。)
 
 **原理**:全程 UI 自动化操控微信内置浏览器(WeChatAppEx.exe):搜索 →
 公众号主页(即完整历史列表)→ 深滚回填至「水位线 − overlap_days」截止日、
@@ -16,7 +16,7 @@ playwright 消费 canonical 全参链接会被微信拦去人工验证,短链可
 ## 技术栈
 
 - Python 3.12(venv)+ uiautomation 2.0.29 —— UIA 是唯一触达微信的通道;
-- SQLite(标准库 sqlite3,主库 `data\crawler.db`)+ PyMySQL(可选镜像库);
+- MySQL(PyMySQL,唯一主库;库/表自动创建,连接参数在 `.env`);
 - 钉钉自定义机器人 webhook(标准库 urllib 直发 markdown);
 - 配置:PyYAML(`config\*.yaml`)+ `.env`(MySQL 凭据,已 gitignore)。
 
@@ -53,7 +53,7 @@ Copy-Item .env.example .env                                    # 再填 MySQL �
 
 - `config/accounts.yaml` — 公众号名单,`accounts:` 键下每行一个 `- 名称`。
 - `config/settings.yaml` — 停止条数、重叠天数、深滚屏数上限、失败重试
-  (`fail_retry`/`fail_retry_wait_sec`)、账号间隔、超时、MySQL 开关、
+  (`fail_retry`/`fail_retry_wait_sec`)、账号间隔、超时、MySQL 表名、
   钉钉推送等。**含钉钉 webhook 凭据,已 gitignore 不入库**;首次部署从
   `config/settings.example.yaml` 复制。
 - `.env`(gitignore)— MySQL 连接参数,配置项名 `WXCHAT_CRAWLER_HOST /
@@ -86,12 +86,12 @@ errcode=310000 拒发)。三类消息:
 不影响抓取主流程。连通性自测:
 `.venv\Scripts\python.exe tools\dingtalk_test.py [文章URL]`
 
-## MySQL 镜像库
+## MySQL 主库
 
-SQLite 仍是唯一主库;每轮结束把 `accounts`/`articles` 两表**全量对账式
-upsert** 到 MySQL(幂等可重放;同步失败仅告警,不影响抓取)。库/表不存在
-自动创建;`crawl_runs` 不镜像。连接参数在 `.env`(见上),默认指向
-`localhost:3306`。手动补同步/对账:`.venv\Scripts\python.exe tools\verify_mysql_sync.py`。
+存储只有 MySQL 一条通道(2026-09-05 起,SQLite 已弃用):直写
+`localhost:3306` 的 `test` 库,表 `wechat_crawler_accounts` /
+`wechat_crawler_articles` / `wechat_crawler_runs`(沿用原镜像表结构与全部
+历史行;库/表不存在自动创建)。连接参数在 `.env`(见上)。
 
 ## 查看数据
 
@@ -99,15 +99,17 @@ upsert** 到 MySQL(幂等可重放;同步失败仅告警,不影响抓取)。库/
 .venv\Scripts\python.exe tools\db_stats.py
 ```
 
-或直接 SQL:`sqlite3 data\crawler.db "select title,url from articles order by id desc"`
-(镜像库同名表 `wechat_crawler_articles` / `wechat_crawler_accounts` 只读即可,
-写入以每轮结束的自动同步为准。)
+或直接 SQL(任意 MySQL 客户端):
+
+```
+mysql -uroot -p test -e "select title,url from wechat_crawler_articles order by id desc"
+```
 
 ## 运行与排障
 
 - 日志:`logs\crawl_YYYY-MM-DD.log`;每行都带完整日期时间,每个步骤
   (含逐篇文章)打印 `用时`,账号间隔等空档也会注明缘由,可直接对着
-  时间线看进展与耗时(正常轮次各写一条 `crawl_runs` 记录,环境预检未通过的轮次不写)。
+  时间线看进展与耗时(正常轮次各写一条 `wechat_crawler_runs` 记录,环境预检未通过的轮次不写)。
 - **轮级统计**:账号失败后停 `fail_retry_wait_sec` 秒重试,最多加试
   `fail_retry` 次;最终失败**即刻**推钉钉告警(带 @);轮末推总结
   (成功/新增/失败清单),日志同步落盘。退出码:有失败为 1,全成功为 0。

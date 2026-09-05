@@ -203,7 +203,6 @@ article:
   close_tab_wait_sec: 2.5
   kick_retry: 2
 run:
-  db_path: data/crawler.db
   log_dir: logs
 {notify}"""
 ACCOUNTS = "accounts:\n  - 中金点睛\n"
@@ -278,7 +277,9 @@ class _FakeCtrl:
         self.BoundingRectangle = type("R", (), {"top": top})()
 
 
-def _cfg(tmp_path, notify: NotifyConfig) -> CrawlConfig:
+def _cfg(tmp_path, mysql_ready, notify: NotifyConfig, name) -> CrawlConfig:
+    """账号名必须每测唯一(make_name):测试表跨运行留存,固定名会撞
+    上一轮同标题的行(fallback_key 相同 → 编排层判已见过 → new=0)。"""
     return CrawlConfig(
         process_name="WeChat.exe", exe_path="C:/x/WeChat.exe",
         expected_version_prefix="3.9", stop_streak=3, overlap_days=3,
@@ -286,11 +287,11 @@ def _cfg(tmp_path, notify: NotifyConfig) -> CrawlConfig:
         scroll_wait_sec=0.0, account_gap_min_sec=0,
         account_gap_max_sec=0, article_open_timeout_sec=1.0,
         url_scan_timeout_sec=1.0, max_tree_nodes=500, close_tab_wait_sec=0.0,
-        kick_retry=1, db_path=tmp_path / "db.sqlite", log_dir=tmp_path / "logs",
-        accounts=["测试号"], notify=notify)
+        kick_retry=1, log_dir=tmp_path / "logs",
+        mysql=mysql_ready, accounts=[name], notify=notify)
 
 
-def _stub_round(monkeypatch, url_result):
+def _stub_round(monkeypatch, url_result, title="构建中国特色新闻学"):
     """桩一轮可跑通的抓取:开主页 → 扫到一篇 → 按 url_result 给 (raw, nodes)。"""
     from src import wechat_bot as bot
     monkeypatch.setattr(orchestrator.version_check, "check_environment",
@@ -305,61 +306,72 @@ def _stub_round(monkeypatch, url_result):
     monkeypatch.setattr(bot, "scroll_to_top",
                         lambda host, wheels=30, wait=0, anchor=None: None)
     monkeypatch.setattr(bot, "scan_list", lambda host, max_nodes=0:
-                        ([_FakeCtrl("构建中国特色新闻学", 100.0)], [("昨天", 0.0)]))
+                        ([_FakeCtrl(title, 100.0)], [("昨天", 0.0)]))
     monkeypatch.setattr(bot, "close_profile_tab", lambda name, wait=0: True)
     monkeypatch.setattr(bot, "open_article_and_get_url", lambda ctrl, **kw: url_result)
 
 
-def _seed_watermark(cfg, name="测试号"):
+def _seed_watermark(mysql_ready, name):
     from src.db import Store
-    store = Store(cfg.db_path)
+    store = Store(mysql_ready)
     acc_id = store.get_or_create_account(name)
     store.set_watermark(acc_id, "2026-09-01")  # 有水位线 → 单次扫描不扩量
     store.close()
 
 
-def test_process_account_pushes_each_new_article(tmp_path, monkeypatch):
+def test_process_account_pushes_each_new_article(tmp_path, mysql_ready, make_name,
+                                                 monkeypatch):
     from src.db import Store
     poster = _Poster([(200, {"errcode": 0})])
     monkeypatch.setattr(notify_mod, "_default_post", poster)
+    title = make_name("文")
     _stub_round(monkeypatch,
-                ("https://mp.weixin.qq.com/s?__biz=MzA1&mid=1&idx=1&sn=aa", 3))
-    cfg = _cfg(tmp_path, _notify())
-    _seed_watermark(cfg)
-    store = Store(cfg.db_path)
+                ("https://mp.weixin.qq.com/s?__biz=MzA1&mid=1&idx=1&sn=aa", 3),
+                title=title)
+    name = make_name("测试号")
+    cfg = _cfg(tmp_path, mysql_ready, _notify(), name)
+    _seed_watermark(mysql_ready, name)
+    store = Store(mysql_ready)
     st = orchestrator.process_account(
-        store, cfg, "测试号", LOG,
+        store, cfg, name, LOG,
         push=orchestrator._make_pusher(cfg.notify, LOG))
     store.close()
     assert st["new"] == 1
     assert len(poster.calls) == 1              # 逐篇即推:一篇一条
     url, payload = poster.calls[0]
     assert url == WEBHOOK                      # 无 secret 不加签
-    assert "构建中国特色新闻学" in payload["markdown"]["text"]
+    assert title in payload["markdown"]["text"]
 
 
-def test_process_account_pending_not_pushed(tmp_path, monkeypatch):
+def test_process_account_pending_not_pushed(tmp_path, mysql_ready, make_name,
+                                            monkeypatch):
     from src.db import Store
     poster = _Poster([(200, {"errcode": 0})])
     monkeypatch.setattr(notify_mod, "_default_post", poster)
-    _stub_round(monkeypatch, (None, -2))  # 标题不符 → pending,无 URL 可推
-    cfg = _cfg(tmp_path, _notify())
-    _seed_watermark(cfg)
-    store = Store(cfg.db_path)
+    _stub_round(monkeypatch, (None, -2),  # 标题不符 → pending,无 URL 可推
+                title=make_name("文"))   # pending 行 dedup 键也全库唯一,标题须每测唯一
+    name = make_name("测试号")
+    cfg = _cfg(tmp_path, mysql_ready, _notify(), name)
+    _seed_watermark(mysql_ready, name)
+    store = Store(mysql_ready)
     st = orchestrator.process_account(
-        store, cfg, "测试号", LOG,
+        store, cfg, name, LOG,
         push=orchestrator._make_pusher(cfg.notify, LOG))
     store.close()
     assert st["pending"] == 1 and poster.calls == []
 
 
-def test_run_pushes_per_article_when_enabled(tmp_path, monkeypatch):
+def test_run_pushes_per_article_when_enabled(tmp_path, mysql_ready, make_name,
+                                             monkeypatch):
     poster = _Poster([(200, {"errcode": 0})])
     monkeypatch.setattr(notify_mod, "_default_post", poster)
+    # 标题/账号都每测唯一:dedup 键全库唯一,常量标题同轮内必撞他测试的行
     _stub_round(monkeypatch,
-                ("https://mp.weixin.qq.com/s?__biz=MzA1&mid=1&idx=1&sn=aa", 3))
-    cfg = _cfg(tmp_path, _notify())
-    _seed_watermark(cfg)
+                ("https://mp.weixin.qq.com/s?__biz=MzA1&mid=1&idx=1&sn=aa", 3),
+                title=make_name("文"))
+    name = make_name("测试号")
+    cfg = _cfg(tmp_path, mysql_ready, _notify(), name)
+    _seed_watermark(mysql_ready, name)
     assert orchestrator.run(cfg) == 0
     # 文章逐篇 1 条 + 轮末总结 1 条(2026-09-04 新增轮级统计)
     assert len(poster.calls) == 2
@@ -369,13 +381,16 @@ def test_run_pushes_per_article_when_enabled(tmp_path, monkeypatch):
     assert t2.startswith("wxcrawler:") and "本轮抓取总结" in t2
 
 
-def test_run_disabled_notify_never_posts(tmp_path, monkeypatch):
+def test_run_disabled_notify_never_posts(tmp_path, mysql_ready, make_name,
+                                         monkeypatch):
     poster = _Poster([(200, {"errcode": 0})])
     monkeypatch.setattr(notify_mod, "_default_post", poster)
     _stub_round(monkeypatch,
-                ("https://mp.weixin.qq.com/s?__biz=MzA1&mid=1&idx=1&sn=aa", 3))
-    cfg = _cfg(tmp_path, NotifyConfig())  # 默认关闭
-    _seed_watermark(cfg)
+                ("https://mp.weixin.qq.com/s?__biz=MzA1&mid=1&idx=1&sn=aa", 3),
+                title=make_name("文"))
+    name = make_name("测试号")
+    cfg = _cfg(tmp_path, mysql_ready, NotifyConfig(), name)  # 默认关闭
+    _seed_watermark(mysql_ready, name)
     assert orchestrator.run(cfg) == 0
     assert poster.calls == []
 

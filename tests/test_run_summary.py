@@ -20,14 +20,14 @@ def _cfg(tmp_path, **over):
               scroll_wait_sec=0.0, account_gap_min_sec=0, account_gap_max_sec=0,
               article_open_timeout_sec=1.0, url_scan_timeout_sec=1.0,
               max_tree_nodes=500, close_tab_wait_sec=0.0, kick_retry=1,
-              db_path=tmp_path / "db.sqlite", log_dir=tmp_path / "logs",
+              log_dir=tmp_path / "logs",
               accounts=["甲", "乙"])
     kw.update(over)
     return CrawlConfig(**kw)
 
 
 class _Store:
-    conn = object()  # sync_mysql 只读该属性(mysql 默认 disabled → 直接跳过)
+    conn = object()  # Store 已整体被桩替换,该属性仅占位
 
     def __init__(self):
         self.finished = None
@@ -63,7 +63,7 @@ def env(monkeypatch):
     monkeypatch.setattr(orchestrator, "setup_logging", lambda d: LOG)
     monkeypatch.setattr(orchestrator.version_check, "check_environment",
                         lambda *a, **k: {"ok": True, "message": "env-ok"})
-    monkeypatch.setattr(orchestrator, "Store", lambda path: store)
+    monkeypatch.setattr(orchestrator, "Store", lambda cfg: store)
     monkeypatch.setattr(orchestrator.random, "shuffle", lambda x: None)
     monkeypatch.setattr(orchestrator.time, "sleep", lambda s: sleeps.append(s))
     monkeypatch.setattr(orchestrator.notify_mod, "send_markdown", md)
