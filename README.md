@@ -32,6 +32,9 @@ Copy-Item .env.example .env                                    # 再填 MySQL �
 
 ## 换机部署(迁移到新电脑)
 
+> 完整版(环境前提 / 首次部署 / 数据迁移二选一 / 部署验证 / 版本校准)
+> 见 **`docs\deployment.md`**;本节速查。
+
 **不在 git 里、必须从旧机器带走的三样**:`config\settings.yaml`(钉钉
 webhook + 调优参数)、`.env`(MySQL 密码)、MySQL `test` 库里的数据
 (水位线与全部文章 URL)。`backups\`(计划任务 XML)与 `data\crawler.db`
