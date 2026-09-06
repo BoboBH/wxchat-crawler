@@ -30,6 +30,35 @@ Copy-Item .env.example .env                                    # 再填 MySQL �
 .venv\Scripts\python.exe -m pytest tests\ -v   # 单测应全绿
 ```
 
+## 换机部署(迁移到新电脑)
+
+**不在 git 里、必须从旧机器带走的三样**:`config\settings.yaml`(钉钉
+webhook + 调优参数)、`.env`(MySQL 密码)、MySQL `test` 库里的数据
+(水位线与全部文章 URL)。`backups\`(计划任务 XML)与 `data\crawler.db`
+(SQLite 历史备份,2026-09-05 前的长链接存档)可选。
+
+1. **装环境**:Windows + PC 微信 4.x(扫码登录;新机器安装路径若不同,
+   改 `settings.yaml` 的 `wechat.exe_path`)+ Python 3.12 64 位 +
+   本机 MySQL 8(`localhost:3306`)。
+2. **拉代码**:`git clone https://github.com/BoboBH/wxchat-crawler.git`
+   (`accounts.yaml` 21 个号随库;定时任务默认不装)。
+3. **Python 依赖**:按上面「安装」节建 venv 装 `requirements.txt`。
+4. **配置**:拷旧机器 `settings.yaml` 与 `.env`(或按 example 重建后填
+   webhook 与密码)。
+5. **迁移数据(二选一)**:
+   - **延续水位线(推荐)** —— 旧机器只导三张表:
+     `mysqldump -uroot -p test wechat_crawler_accounts wechat_crawler_articles wechat_crawler_runs > wc.sql`,
+     新机器 `CREATE DATABASE test;` 后 `mysql -uroot -p test < wc.sql`
+     (`test` 若是共库,只动这三张表);
+   - **全新开始** —— 不导数据,首跑自动建库建表,全部账号按新账号
+     (`new_account_screens` 屏)重建水位线;旧机数据留档兜底。
+6. **验证**:`pytest tests\ -v` 全绿(测试库 `wxchat_crawler_test` 自动建)
+   → `run_crawl.py --check` 输出「OK,可以抓取」→ `tools\db_stats.py`
+   看数据 → `run_crawl.py --account 中金点睛` 单号试跑 → 空闲时段全量轮。
+7. **注意**:微信大版本不同(非 4.1.x)时先跑 `--check`,控件常量按
+   `docs\spike-findings.md` 用 `tools\` 尖峰工具重新校准;其余运行事项
+   (窗口不能关、空闲时段、搜索页 tab 自愈)见下「运行」与「已知限制」。
+
 ## 运行(手动单轮)
 
 1. 启动 PC 微信并扫码登录(保持运行;窗口可最小化但**不能关闭**)。
