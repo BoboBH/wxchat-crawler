@@ -34,6 +34,8 @@ class CrawlConfig:
     close_tab_wait_sec: float
     kick_retry: int
     log_dir: Path
+    log_max_mb: int = 50         # 单个日志文件上限(MB),超限滚动 .log.1/.log.2…
+    log_keep_days: int = 7       # 日志保留天数(含今天),启动时清理更早的
     fail_retry: int = 3          # 账号失败后的重试次数(0=不重试)
     fail_retry_wait_sec: float = 10.0  # 重试前暂停秒数
     accounts: list[str] = field(default_factory=list)
@@ -235,6 +237,12 @@ def load_config(settings_path=DEFAULT_SETTINGS,
         crawl.get("fail_retry_wait_sec", cfg.fail_retry_wait_sec))
     if cfg.fail_retry_wait_sec < 0:
         raise ConfigError("crawl.fail_retry_wait_sec 不能为负")
+    cfg.log_max_mb = int(run.get("log_max_mb", cfg.log_max_mb))
+    if cfg.log_max_mb < 1:
+        raise ConfigError("run.log_max_mb 必须 >= 1")
+    cfg.log_keep_days = int(run.get("log_keep_days", cfg.log_keep_days))
+    if cfg.log_keep_days < 1:
+        raise ConfigError("run.log_keep_days 必须 >= 1")
     cfg.notify = _parse_notify(s.get("notify"))
     if cfg.notify.enabled and not cfg.notify.webhook:
         raise ConfigError("notify.enabled=true 但 notify.webhook 为空")

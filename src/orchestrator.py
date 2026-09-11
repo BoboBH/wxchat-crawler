@@ -10,28 +10,62 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 from contextlib import contextmanager
 from datetime import date, timedelta
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from . import canonical, notify as notify_mod, version_check, wechat_bot as bot
 from .canonical import find_stop_index, make_dedup_key, normalize_date_text, pair_publish_dates
 from .config import CrawlConfig, NotifyConfig
 from .db import Store
 
+# crawl_日期.log[.N] 形态(保留清理只认这个模式,其他文件一概不动)
+_LOG_FILE_RE = re.compile(r"^crawl_(\d{4}-\d{2}-\d{2})\.log(\.\d+)?$")
 
-def setup_logging(log_dir) -> logging.Logger:
+
+def _purge_old_logs(log_dir, keep_days: int) -> int:
+    """删除 keep_days 天前的 crawl_*.log*(含滚动件),返回删除数。
+
+    保留窗口 = 含今天的最近 keep_days 个自然日(7 天 → 今天~6 天前)。
+    删除失败(文件被占用等)跳过不阻塞抓取。
+    """
+    cutoff = (date.today() - timedelta(days=keep_days - 1)).isoformat()
+    removed = 0
+    for p in log_dir.glob("crawl_*.log*"):
+        m = _LOG_FILE_RE.match(p.name)
+        if m and m.group(1) < cutoff:
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def setup_logging(log_dir, max_bytes: int = 50 * 1024 * 1024,
+                  keep_days: int = 7) -> logging.Logger:
+    """日志初始化:单文件按 max_bytes 滚动(超限转 .log.1/.log.2…,
+    每日至多 10 个文件≈500MB 兜底),启动时清掉超过 keep_days 天的旧日志。"""
+    log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
+    removed = _purge_old_logs(log_dir, keep_days)
     logfile = log_dir / f"crawl_{date.today().isoformat()}.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",  # 每行带完整日期:跨日巡检/与 crawl_runs 对得上
-        handlers=[logging.FileHandler(logfile, encoding="utf-8"),
+        handlers=[RotatingFileHandler(logfile, maxBytes=max_bytes,
+                                      backupCount=9, encoding="utf-8"),
                   logging.StreamHandler()],
         force=True,
     )
-    return logging.getLogger("crawler")
+    log = logging.getLogger("crawler")
+    if removed:
+        log.info("日志清理: 已删除 %d 个超过 %d 天的旧日志", removed, keep_days)
+    return log
 
 
 def fmt_duration(seconds: float) -> str:
@@ -64,7 +98,8 @@ def log_step(log: logging.Logger, fmt: str, *args):
 
 def run_check(cfg: CrawlConfig) -> int:
     """环境自检(--check):进程/版本 + AppEx 窗口 + 搜索页可用性。"""
-    log = setup_logging(cfg.log_dir)
+    log = setup_logging(cfg.log_dir, max_bytes=cfg.log_max_mb * 1024 * 1024,
+                        keep_days=cfg.log_keep_days)
     rep = version_check.check_environment(
         cfg.process_name, cfg.exe_path, cfg.expected_version_prefix)
     log.info("微信: %s", rep["message"])
@@ -457,7 +492,8 @@ def _notify_summary(cfg: CrawlConfig, ok_names: list[str],
 
 
 def run(cfg: CrawlConfig, only_account: str | None = None) -> int:
-    log = setup_logging(cfg.log_dir)
+    log = setup_logging(cfg.log_dir, max_bytes=cfg.log_max_mb * 1024 * 1024,
+                        keep_days=cfg.log_keep_days)
     t_run = time.perf_counter()
     rep = version_check.check_environment(
         cfg.process_name, cfg.exe_path, cfg.expected_version_prefix)

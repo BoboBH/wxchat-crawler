@@ -31,6 +31,8 @@ article:
 run:
   # 相对路径以进程工作目录为基准(手动运行请在仓库根目录执行)
   log_dir: logs
+  log_max_mb: 50        # 单个日志文件上限(MB),超限滚动为 .log.1/.log.2…
+  log_keep_days: 7      # 日志最多保留天数(含今天),每次启动清掉更早的 crawl_*.log*
 
 # MySQL 主库(2026-09-05 起唯一存储,SQLite 已弃用;库/表自动创建)
 # 连接参数(host/port/user/password/database)不放这里 —— 在项目根 .env

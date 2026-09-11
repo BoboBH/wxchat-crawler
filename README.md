@@ -142,6 +142,8 @@ mysql -uroot -p test -e "select title,url from wechat_crawler_articles order by 
 - 日志:`logs\crawl_YYYY-MM-DD.log`;每行都带完整日期时间,每个步骤
   (含逐篇文章)打印 `用时`,账号间隔等空档也会注明缘由,可直接对着
   时间线看进展与耗时(正常轮次各写一条 `wechat_crawler_runs` 记录,环境预检未通过的轮次不写)。
+  单文件超 `run.log_max_mb`(默认 50MB)滚动为 `.log.1/.log.2…`;每次启动
+  自动清理超过 `run.log_keep_days`(默认 7)天的旧日志。
 - **轮级统计**:账号失败后停 `fail_retry_wait_sec` 秒重试,最多加试
   `fail_retry` 次;最终失败**即刻**推钉钉告警(带 @);轮末推总结
   (成功/新增/失败清单),日志同步落盘。退出码:有失败为 1,全成功为 0。

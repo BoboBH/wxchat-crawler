@@ -125,7 +125,7 @@ def test_run_end_of_round_sweeps_tabs(tmp_path, monkeypatch):
                 "message": "扫描1条,新增1"}
 
     monkeypatch.setattr(orchestrator, "process_account", fake)
-    monkeypatch.setattr(orchestrator, "setup_logging", lambda d: LOG)
+    monkeypatch.setattr(orchestrator, "setup_logging", lambda d, **k: LOG)
     monkeypatch.setattr(orchestrator.version_check, "check_environment",
                         lambda *a, **k: {"ok": True, "message": "env-ok"})
 

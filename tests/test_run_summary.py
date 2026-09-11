@@ -60,7 +60,7 @@ def env(monkeypatch):
     store = _Store()
     sleeps: list[float] = []
     md = _Md()
-    monkeypatch.setattr(orchestrator, "setup_logging", lambda d: LOG)
+    monkeypatch.setattr(orchestrator, "setup_logging", lambda d, **k: LOG)
     monkeypatch.setattr(orchestrator.version_check, "check_environment",
                         lambda *a, **k: {"ok": True, "message": "env-ok"})
     monkeypatch.setattr(orchestrator, "Store", lambda cfg: store)

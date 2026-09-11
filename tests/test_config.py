@@ -109,3 +109,29 @@ def test_bad_gap(tmp_path):
                                                         "account_gap_min_sec: 999"))
     with pytest.raises(ConfigError, match="account_gap"):
         load_config(sp, ap)
+
+
+# ------------------------------------------------ 日志滚动配置(2026-09-08)
+
+def test_log_rotation_defaults(tmp_path):
+    sp, ap = _write(tmp_path)
+    cfg = load_config(sp, ap)
+    assert cfg.log_max_mb == 50    # 单文件上限默认 50MB
+    assert cfg.log_keep_days == 7  # 保留天数默认 7 天
+
+
+def test_log_rotation_custom(tmp_path):
+    sp, ap = _write(tmp_path, settings=SETTINGS.replace(
+        "  log_dir: logs\n",
+        "  log_dir: logs\n  log_max_mb: 20\n  log_keep_days: 3\n"))
+    cfg = load_config(sp, ap)
+    assert cfg.log_max_mb == 20
+    assert cfg.log_keep_days == 3
+
+
+@pytest.mark.parametrize("key", ["log_max_mb", "log_keep_days"])
+def test_bad_log_rotation_values(tmp_path, key):
+    sp, ap = _write(tmp_path, settings=SETTINGS.replace(
+        "  log_dir: logs\n", f"  log_dir: logs\n  {key}: 0\n"))
+    with pytest.raises(ConfigError, match=key):
+        load_config(sp, ap)

@@ -296,7 +296,7 @@ def _stub_round(monkeypatch, url_result, title="构建中国特色新闻学"):
     from src import wechat_bot as bot
     monkeypatch.setattr(orchestrator.version_check, "check_environment",
                         lambda *a, **kw: {"ok": True, "message": "环境OK"})
-    monkeypatch.setattr(orchestrator, "setup_logging", lambda log_dir: LOG)
+    monkeypatch.setattr(orchestrator, "setup_logging", lambda log_dir, **k: LOG)
     monkeypatch.setattr(bot, "search_open_profile", lambda name: (True, ""))
     monkeypatch.setattr(bot, "find_profile_host",
                         lambda account=None, kicks=0: (100, object()))

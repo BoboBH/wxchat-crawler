@@ -4,9 +4,15 @@
 每一步的进展和时耗」—— 日志行带完整日期(datefmt)+ 每步(含逐篇)用时。
 只测编排层日志形状,不触真实 UIA(全部 monkeypatch 桩);集成用例的 store
 走 MySQL 测试库(根 conftest 夹具,与 test_db.py 同前提)。
+
+2026-09-08 增:日志滚动 —— 单文件按 max_bytes 滚动(.log.1/.log.2…),
+启动时清理超过保留天数的 crawl_*.log*(2026-09-08 用户诉求:单文件≤50MB,
+最多保留 7 天)。
 """
 import logging
 import re
+from contextlib import contextmanager
+from datetime import date, timedelta
 
 import pytest
 
@@ -70,6 +76,75 @@ def test_setup_logging_writes_full_datetime(tmp_path):
             if h not in saved:
                 h.close()
         root.handlers[:] = saved
+
+
+# --------------------------------------------- 日志滚动与保留(2026-09-08)
+
+@contextmanager
+def _fresh_logging(tmp_path, **kw):
+    """跑一次 setup_logging 并在退出时恢复 root handlers(Windows 下文件
+    句柄不关会锁住 tmp_path,teardown 删目录直接 PermissionError)。"""
+    root = logging.getLogger()
+    saved = list(root.handlers)
+    try:
+        yield orchestrator.setup_logging(tmp_path, **kw)
+    finally:
+        for h in root.handlers:
+            if h not in saved:
+                h.close()
+        root.handlers[:] = saved
+
+
+def _make_logs(log_dir, names):
+    log_dir.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (log_dir / n).write_text("x", encoding="utf-8")
+    return log_dir
+
+
+def test_setup_logging_purges_logs_beyond_keep_days(tmp_path):
+    d = tmp_path / "logs"
+    today = date.today()
+    names = [
+        f"crawl_{today - timedelta(days=30)}.log",
+        f"crawl_{today - timedelta(days=30)}.log.1",   # 滚动件同样按日期清
+        f"crawl_{today - timedelta(days=7)}.log",      # 第 8 天 → 删
+        f"crawl_{today - timedelta(days=6)}.log",      # 恰好第 7 天 → 留
+        f"crawl_{today.isoformat()}.log",
+        "other.txt",                                    # 非日志文件不动
+    ]
+    _make_logs(d, names)
+    with _fresh_logging(d, keep_days=7):
+        pass
+    assert not (d / names[0]).exists()
+    assert not (d / names[1]).exists()
+    assert not (d / names[2]).exists()
+    assert (d / names[3]).exists()
+    assert (d / names[4]).exists()
+    assert (d / names[5]).exists()
+
+
+def test_setup_logging_keep_days_1_keeps_only_today(tmp_path):
+    d = tmp_path / "logs"
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    _make_logs(d, [f"crawl_{yesterday}.log", f"crawl_{date.today().isoformat()}.log"])
+    with _fresh_logging(d, keep_days=1):
+        pass
+    assert not (d / f"crawl_{yesterday}.log").exists()
+    assert (d / f"crawl_{date.today().isoformat()}.log").exists()
+
+
+def test_setup_logging_rotates_file_at_max_bytes(tmp_path):
+    d = tmp_path / "logs"
+    with _fresh_logging(d, max_bytes=400) as log:
+        for i in range(30):
+            log.info("滚动测试第%d行%s", i, "x" * 40)
+    rolled = list(d.glob("crawl_*.log.[0-9]*"))
+    assert rolled, "超过 max_bytes 后应出现 .log.1 等滚动文件"
+    files = list(d.glob("crawl_*.log*"))
+    assert len(files) >= 2
+    for p in files:
+        assert p.stat().st_size <= 400 + 200  # 单文件不超上限(留一行余量)
 
 
 # --------------------------------------------- process_account 逐篇计时行(集成)
