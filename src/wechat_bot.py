@@ -63,6 +63,8 @@ USER32.GetClipboardData.argtypes = [ctypes.c_uint]
 USER32.GetClipboardData.restype = ctypes.c_void_p
 USER32.GetForegroundWindow.restype = ctypes.c_void_p  # 前台句柄比较必须完整 64 位
 USER32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+USER32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+USER32.GetAncestor.restype = ctypes.c_void_p  # GA_ROOT 解析须完整 64 位(防句柄符号位截断)
 K32.GlobalLock.argtypes = [ctypes.c_void_p]
 K32.GlobalLock.restype = ctypes.c_void_p
 K32.GlobalUnlock.argtypes = [ctypes.c_void_p]
@@ -523,13 +525,25 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
     """从搜索页搜索账号并打开其主页,返回 (ok, message)。
 
     前置:任一 AppEx 窗口有含 weixin-search-input 的搜索页 tab(部署时人工
-    打开一次「搜一搜」即可,之后复用)。剪贴板临时占用并在 finally 恢复;
-    粘贴是合成键鼠,锁屏下会失败。失败时可能残留已打开的主页 tab
-    (由编排层负责清理,见 close_profile_tab)。
+    打开一次「搜一搜」即可,之后复用)。粘贴是合成键鼠,发键前经前台闸门
+    (桌面状态 → 置前 → 复核,见 _ensure_foreground):锁屏/置前失败一律
+    不发键、不碰剪贴板,宁跳过不误写用户前台应用。剪贴板临时占用并在
+    finally 恢复。失败时可能残留已打开的主页 tab(由编排层负责清理,
+    见 close_profile_tab)。
     """
     win, host, edit = find_search_entry()
     if edit is None:
         return False, f"{SEARCH_PAGE_MISSING}(weixin-search-input);将尝试自动引导「搜一搜」"
+
+    # 前台闸门(2026-09-11):AppEx 不在前台时,点击/按键会落进用户前台应用
+    # (Ctrl+A/V 属破坏性输入)或被锁屏吞掉。置前成功会短暂接管用户焦点,
+    # 这是合成键鼠流程的既定代价(与 _bootstrap_once 同一防线)。
+    state = desktop_state()
+    if state != "ok":
+        return False, f"桌面状态={state}(锁屏/无前台窗口),不发合成键,本轮跳过"
+    hwnd = USER32.GetAncestor(host.NativeWindowHandle or 0, 2) or host.NativeWindowHandle
+    if not _ensure_foreground(hwnd):
+        return False, "AppEx 窗口未置前,不发合成键(避免误写前台应用),本轮跳过"
 
     def is_account_card(c) -> bool:
         """结果页公众号卡片:同名前缀的小程序/文章卡片(实测同名开头)必须排除,
@@ -548,7 +562,10 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
         time.sleep(0.6)
         uia.SetClipboardText(account)
         pasted = False
-        for _ in range(3):  # 前台被用户抢占时合成粘贴会落空:读回校验,失败重聚焦重贴
+        for _ in range(3):  # 合成粘贴落空时读回校验,失败重聚焦重贴
+            # 点击/读回耗时数秒,前台可能被用户抢回:发键前再复核一遍
+            if not _ensure_foreground(hwnd):
+                return False, "粘贴前前台被抢且置回失败,中止发键,本轮跳过"
             uia.SendKeys("{Ctrl}a")
             time.sleep(0.2)
             uia.SendKeys("{Ctrl}v")
@@ -559,7 +576,7 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
             edit.Click(simulateMove=False)
             time.sleep(0.6)
         if not pasted:
-            return False, "搜索框粘贴未生效(前台被占用或桌面锁定),本轮跳过"
+            return False, "搜索框粘贴读回校验连续3次未命中,本轮跳过"
         btn = None
         for c in walk_ctrls(host, max_nodes=3000):
             try:
@@ -571,8 +588,10 @@ def search_open_profile(account: str, nav_timeout: float = 45.0):
                 continue
         if btn is not None:
             invoke_control(btn)
-        else:
+        elif _ensure_foreground(hwnd):  # 回车兜底也是合成键:失守即弃,不误发
             uia.SendKeys("{Enter}")
+        else:
+            return False, "搜索按钮未找到且前台失守,跳过回车,本轮跳过"
         # 等搜索结果卡片并 Invoke 打开主页
         t0 = time.time()
         opened = False
@@ -693,6 +712,20 @@ def _foreground_is(hwnd: int) -> bool:
         return bool(fg) and int(fg) == int(hwnd)
     except Exception:
         return False
+
+
+def _ensure_foreground(hwnd: int) -> bool:
+    """前台已在本窗直接放行;不在则置前一次并复核,复核不过一律 False。
+
+    合成键发往搜索框前的唯一通行证(与 _bootstrap_once 的发键前复核同一
+    防线);置前只在必要时发生(AttachThreadInput/Alt tap 有轻微副作用,
+    前台恰当时绝不触发)。成功置前打一行诊断,便于统计用户占用频率。"""
+    if _foreground_is(hwnd):
+        return True
+    if _force_foreground(hwnd) and _foreground_is(hwnd):
+        _log.info("[前台] AppEx 不在前台,已置前 hwnd=%s", hwnd)
+        return True
+    return False
 
 
 def _focus_main() -> tuple[int | None, str]:
